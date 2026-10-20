@@ -19,6 +19,47 @@ Verified against codex-cli 0.163.0: the hook output schema uses
 `deny_unknown_fields` (no stray fields), matchers are exact-alternation on tool
 name, and hook timeouts kill the whole process tree.
 
+## Deployment
+
+1. **Install scripts** — copy the four `*_edit_gate.py` files into
+   `~/.codex/scripts/`. They are standalone and stdlib-only; nothing else from
+   this repo is needed at runtime.
+2. **Register the hooks** — add one `[[hooks]]` block per gate to
+   `~/.codex/config.toml` (see the exact set below). The interpreter path is
+   machine-specific: adjust it to where your Python lives.
+3. **Re-trust the hooks** — adding or editing a `[[hooks]]` block changes its
+   trusted-hash identity, so codex silently disables that hook until you accept
+   the trust prompt once in an interactive session. Without this step the gates
+   never run (automation can force-run them for one invocation with
+   `codex exec --dangerously-bypass-hook-trust`).
+4. **Optional external tooling** — each gate discovers its checkers at runtime
+   (cached 1 h) and degrades to a lighter tier when one is missing, never an
+   error: ruff/pyflakes/bandit (py), rustfmt/cargo (rs), PSScriptAnalyzer
+   (win), miss-hit `mh_lint` + MATLAB (ml).
+5. **Verify** — edit a watched file in a scratch project and confirm an audit
+   record appears in `~/.codex/logs/<gate>.jsonl`, then run the `tests/`
+   suites below for the full synthetic matrix.
+
+The registration set is five blocks. Every PostToolUse block uses the matcher
+`apply_patch|Edit|Write|MultiEdit|edit_file|write_file`; one block as a
+template (the rest differ only in the command):
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "apply_patch|Edit|Write|MultiEdit|edit_file|write_file"
+hooks = [
+  { type = "command", command = 'C:\Users\a\.conda\envs\work\python.exe C:\Users\a\.codex\scripts\py_edit_gate.py', timeout = 25 },
+]
+```
+
+| Event | Command | Timeout |
+|---|---|---|
+| PostToolUse | `py_edit_gate.py` | 25 |
+| PostToolUse | `rs_edit_gate.py` | 25 |
+| Stop | `rs_edit_gate.py --stop` | 60 |
+| PostToolUse | `win_edit_gate.py` | 25 |
+| PostToolUse | `ml_edit_gate.py` | 25 |
+
 ## Operational notes
 
 - Registration lives in `~/.codex/config.toml` under `[[hooks.PostToolUse]]` /
