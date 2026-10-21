@@ -985,6 +985,25 @@ def auto_imports(tools: Tools, path: Path) -> list[str]:
 
 
 # ── Advisory composition ────────────────────────────────────────────────────
+# Notes about tool state or wall-clock behaviour, not about the file. They
+# differ across retries of the same edit, which would make the injected
+# context prefix diverge (prefill cache misses), so they are split off at the
+# compose boundary and land in the audit log instead of the advisory.
+_VOLATILE_NOTE_RE = re.compile(
+    r"timed out|time cap|unavailable|did not run|produced no output"
+    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
+)
+
+
+def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
+    """(advisory notes, audit notes): file-derived vs environment-derived."""
+    stable: list[str] = []
+    volatile: list[str] = []
+    for note in notes:
+        (volatile if _VOLATILE_NOTE_RE.search(note) else stable).append(note)
+    return stable, volatile
+
+
 def compose_advisory(
     fixed: list[str],
     imports_added: list[str],
@@ -1186,6 +1205,7 @@ def main(argv: list[str]) -> int:
     notes = list(sections["notes"])
     if _now() >= deadline:
         notes.append("some checks skipped (time cap)")
+    stable_notes, volatile_notes = split_notes(notes)
     advisory = compose_advisory(
         sections["fixed"],
         sections["imports_added"],
@@ -1193,7 +1213,7 @@ def main(argv: list[str]) -> int:
         sections["missing"],
         sections["lint"],
         sections["security"],
-        notes,
+        stable_notes,
     )
     audit(
         {
@@ -1204,6 +1224,7 @@ def main(argv: list[str]) -> int:
             "tier": tools.tier,
             "fix_allowed": allow_fix,
             "advisory_chars": len(advisory),
+            "skipped": volatile_notes,
             "ms": int((_now() - started) * 1000),
         },
     )

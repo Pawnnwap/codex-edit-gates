@@ -599,6 +599,25 @@ def clippy_fix_guarded(
 
 
 # ── Advisory ────────────────────────────────────────────────────────────────
+# Notes about tool state or wall-clock behaviour, not about the file. They
+# differ across retries of the same edit, which would make the injected
+# context prefix diverge (prefill cache misses), so they are split off at the
+# compose boundary and land in the audit log instead of the advisory.
+_VOLATILE_NOTE_RE = re.compile(
+    r"timed out|time cap|unavailable|did not run|produced no output"
+    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
+)
+
+
+def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
+    """(advisory notes, audit notes): file-derived vs environment-derived."""
+    stable: list[str] = []
+    volatile: list[str] = []
+    for note in notes:
+        (volatile if _VOLATILE_NOTE_RE.search(note) else stable).append(note)
+    return stable, volatile
+
+
 def compose_advisory(
     fixed: list[str],
     parse_errors: list[str],
@@ -727,6 +746,7 @@ def run_edit_mode(payload: dict, argv: list[str], state: dict) -> str:
     notes = list(sections["notes"])
     if _now() >= deadline:
         notes.append("checks truncated by the hook time cap")
+    stable_notes, volatile_notes = split_notes(notes)
     audit(
         {
             "ts": round(time.time(), 2),
@@ -736,11 +756,12 @@ def run_edit_mode(payload: dict, argv: list[str], state: dict) -> str:
             "files": [str(p) for p in targets],
             "crates": checked_crates,
             "fix_allowed": allow_fix,
+            "skipped": volatile_notes,
             "ms": int((_now() - started) * 1000),
         }
     )
     return compose_advisory(
-        sections["fixed"], sections["parse"], sections["errors"], sections["warnings"], notes
+        sections["fixed"], sections["parse"], sections["errors"], sections["warnings"], stable_notes
     )
 
 
@@ -778,6 +799,12 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
         and _now() < deadline - 12.0
     ):
         fixed, warnings, fix_notes = clippy_fix_guarded(crate, deadline)
+    notes = ([result["note"]] if result["note"] else []) + fix_notes
+    # The per-run duration is timing data, not a finding: it must never reach
+    # the advisory or identical edits diverge in the context prefix.
+    stable_notes, volatile_notes = split_notes(
+        notes + [f"clippy {crate.name} in {result['seconds']}s"]
+    )
     audit(
         {
             "ts": round(time.time(), 2),
@@ -789,16 +816,16 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
             "fixable": result["fixable"],
             "fixed": len(fixed),
             "note": result["note"],
+            "skipped": volatile_notes,
             "ms": int((_now() - started) * 1000),
         }
     )
-    notes = ([result["note"]] if result["note"] else []) + fix_notes
     return compose_advisory(
         fixed,
         [],
         [e["text"] for e in result["errors"]],
         [w["text"] for w in warnings],
-        notes + [f"clippy {crate.name} in {result['seconds']}s"],
+        stable_notes,
     )
 
 
