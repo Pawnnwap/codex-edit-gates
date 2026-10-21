@@ -2,7 +2,7 @@
 
 Codex lifecycle hooks (PostToolUse + Stop) that check, and where provably safe
 fix, the files a Codex session just edited. Registered globally in
-`~/.codex/config.toml`, so every session on this machine gets them. All six
+`~/.codex/config.toml`, so every session on this machine gets them. All seven
 gates are stdlib-only, standalone, and fail open: any internal error means
 exit 0 with no output, so a broken gate can never break a session.
 
@@ -14,6 +14,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | `ml_edit_gate.py` | encoding traps (UTF-16, UTF-8 BOM, GBK-only, invalid bytes), mh_lint parse/structural, `matlab -batch` checkcode (cadence-throttled) | — (advisory-only) |
 | `cpp_edit_gate.py` | encoding traps (UTF-16, MSVC's BOM-less non-ASCII codepage fallback, GBK-only), `clang++ -fsyntax-only` (parse-class errors only) | — (advisory-only) |
 | `js_edit_gate.py` | encoding traps (UTF-16, GBK-only), `node --check` (.js/.mjs/.cjs), `stripTypeScriptTypes` (.ts/.mts/.cts) | — (advisory-only) |
+| `html_edit_gate.py` | charset declaration vs bytes mismatches, no-charset non-ASCII, tag-stack structure (stray/mismatched/unclosed/dup attrs), strict XML for .xhtml | — (advisory-only, pure stdlib, ~1 ms) |
 
 Findings are reported as short advisories via
 `hookSpecificOutput.additionalContext` (PostToolUse) or `systemMessage` (Stop).
@@ -42,7 +43,7 @@ name, and hook timeouts kill the whole process tree.
    record appears in `~/.codex/logs/<gate>.jsonl`, then run the `tests/`
    suites below for the full synthetic matrix.
 
-The registration set is seven blocks. Every PostToolUse block uses the matcher
+The registration set is eight blocks. Every PostToolUse block uses the matcher
 `apply_patch|Edit|Write|MultiEdit|edit_file|write_file`; one block as a
 template (the rest differ only in the command):
 
@@ -63,6 +64,7 @@ hooks = [
 | PostToolUse | `ml_edit_gate.py` | 25 |
 | PostToolUse | `cpp_edit_gate.py` | 25 |
 | PostToolUse | `js_edit_gate.py` | 25 |
+| PostToolUse | `html_edit_gate.py` | 25 |
 
 ## Operational notes
 
@@ -71,14 +73,15 @@ hooks = [
   command + timeout), not the script bytes: editing these scripts does NOT
   require re-trust, but touching a `[[hooks]]` block silently disables that
   hook until it is re-trusted in an interactive session.
-- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js}_edit_gate.jsonl` (+ `.state.json`).
+- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js,html}_edit_gate.jsonl` (+ `.state.json`).
 - Kill switches:
   - env: `PY_EDIT_GATE=0`, `RS_EDIT_GATE=0`, `WIN_EDIT_GATE=0`, `ML_EDIT_GATE=0`,
-    `CPP_EDIT_GATE=0`, `JS_EDIT_GATE=0`
+    `CPP_EDIT_GATE=0`, `JS_EDIT_GATE=0`, `HTML_EDIT_GATE=0`
   - stop-fix only: `RS_EDIT_GATE_AUTOFIX=0`
   - ml authoritative tier only: `ML_EDIT_GATE_CHECKCODE=0` (no matlab spawn)
   - per project: a `.edit-gate-disable` marker file (advisories only; it also
-    suppresses the heavyweight runs: matlab for ml, clang/node for cpp/js)
+    suppresses the heavyweight runs: matlab for ml, clang/node for cpp/js, the
+    structure check for html)
   - CLI in the hook command: `--no-autofix` (and `--format` to opt in to
     whole-file formatters)
 - Prefill-cache-friendly output: the advisory is a deterministic function of
@@ -109,6 +112,7 @@ python tests/verify_rs_stopfix.py  # rs: guarded clippy --fix, kill switches, ch
 python tests/verify_ml_gate.py     # ml: encoding tier, mh_lint, checkcode tier, kill switches, dedupe/throttle
 python tests/verify_cpp_gate.py    # cpp: encoding traps, clang++ parse whitelist, marker, determinism
 python tests/verify_js_gate.py     # js: encoding, node --check, TS strip probe, marker, determinism
+python tests/verify_html_gate.py   # html: charset mismatches, tag-stack anti-false-positive battery, determinism
 ```
 
 They target the installed copies under `~/.codex/scripts`; adjust `GATE` in
