@@ -1021,11 +1021,9 @@ def compose_advisory(
             bits.append("added " + ", ".join(imports_added))
         bits.extend(fixed)
         blocks.append(
-            "[py-edit-gate] AUTO-FIXED: "
+            "AUTO-FIXED: "
             + "; ".join(bits)
-            + ". RE-READ the file before your next patch and do not resubmit"
-            " the whole file: this gate edited it in place, which shifts lines"
-            " and stale context lines.",
+            + ". File rewritten in place - re-read before next patch.",
         )
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
@@ -1033,7 +1031,7 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[py-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("MISSING IMPORT", missing_imports)
     add("DOES NOT COMPILE", syntax, 4)
@@ -1042,7 +1040,9 @@ def compose_advisory(
     add("note", notes, 4)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[py-edit-gate] {blocks[0]}"] + blocks[1:])
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS

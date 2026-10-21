@@ -268,7 +268,7 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     findings: list[str] = []
     if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff"):
         findings.append(
-            f"{name}: UTF-16 file - node reads it as mojibake, save as UTF-8"
+            f"{name}: UTF-16 - node reads it as mojibake; save as UTF-8"
         )
         return findings
     # UTF-8 (with or without BOM) is the JS source encoding; node strips the
@@ -285,13 +285,12 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
         gbk_ok = False
     if not utf8_ok and not gbk_ok:
         findings.append(
-            f"{name}: bytes valid in neither UTF-8 nor GBK - the file mojibakes"
-            " under every reader"
+            f"{name}: valid in neither UTF-8 nor GBK - mojibake everywhere"
         )
     elif not utf8_ok and gbk_ok:
         findings.append(
-            f"{name}: GBK/CP936 only - string literals are mojibake under every"
-            " UTF-8 toolchain (node, browsers, bundlers); save as UTF-8"
+            f"{name}: GBK/CP936 only - literals mojibake under every UTF-8"
+            " toolchain; save as UTF-8"
         )
     return findings
 
@@ -479,14 +478,16 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[js-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", syntax, 4)
     add("encoding", encoding)
     add("note", notes, 4)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[js-edit-gate] {blocks[0]}"] + blocks[1:])
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS

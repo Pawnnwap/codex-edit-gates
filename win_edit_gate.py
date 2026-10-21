@@ -231,17 +231,17 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     findings: list[str] = []
     if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff"):
         if path.suffix.lower() in BATCH_SUFFIXES:
-            findings.append(f"{name}: UTF-16 file, cmd.exe cannot read it - save as ANSI/UTF-8 (no BOM)")
+            findings.append(f"{name}: UTF-16 - cmd.exe cannot read it; save as ANSI/UTF-8 (no BOM)")
         return findings
     if path.suffix.lower() in BATCH_SUFFIXES:
         if b"\xef\xbb\xbf" in blob[:8]:
-            findings.append(f"{name}: UTF-8 BOM confuses cmd.exe (first line is not recognised)")
+            findings.append(f"{name}: UTF-8 BOM breaks cmd.exe's first line; save without BOM")
         if b"\r\n" not in blob and b"\n" in blob:
-            findings.append(f"{name}: LF-only line endings, cmd.exe mis-parses blocks - convert to CRLF")
+            findings.append(f"{name}: LF-only endings break cmd.exe blocks; convert to CRLF")
         return findings
     if b"\xef\xbb\xbf" not in blob and any(byte > 127 for byte in blob):
         findings.append(
-            f"{name}: non-ASCII text in BOM-less UTF-8 - PowerShell 5.1 reads it as ANSI and garbles it"
+            f"{name}: non-ASCII in BOM-less UTF-8 - PS 5.1 reads ANSI and garbles; add a BOM"
         )
     return findings
 
@@ -261,11 +261,11 @@ def batch_findings(text: str, path: Path) -> list[str]:
         match = _BATCH_LEAD_RE.match(stripped)
         if match and not match.group(1):
             findings.append(
-                f"{path.name}:{number} runs {match.group('target')} without `call` - control transfers and this script never resumes"
+                f"{path.name}:{number} runs {match.group('target')} without `call` - control never returns here"
             )
         if not has_delayed and _DELAYED_EXPANSION_RE.search(stripped):
             findings.append(
-                f"{path.name}:{number} uses !var! syntax without `setlocal EnableDelayedExpansion` - it expands to nothing"
+                f"{path.name}:{number} uses !var! without `setlocal EnableDelayedExpansion` - it expands to nothing"
             )
     return findings
 
@@ -427,8 +427,8 @@ def compose_advisory(fixed: list[str], syntax: list[str], encoding: list[str], b
     blocks: list[str] = []
     if fixed:
         blocks.append(
-            "[win-edit-gate] AUTO-FIXED: " + "; ".join(fixed)
-            + ". RE-READ the file before your next patch and do not resubmit the whole file."
+            "AUTO-FIXED: " + "; ".join(fixed)
+            + ". File rewritten in place - re-read before next patch."
         )
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
@@ -436,7 +436,7 @@ def compose_advisory(fixed: list[str], syntax: list[str], encoding: list[str], b
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[win-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", syntax, 5)
     add("encoding", encoding, 3)
@@ -445,11 +445,9 @@ def compose_advisory(fixed: list[str], syntax: list[str], encoding: list[str], b
     add("note", notes, 3)
     if not blocks:
         return ""
-    if not fixed:
-        blocks.append(
-            "[win-edit-gate] Re-read the file and repair it with a targeted patch - do not resubmit the whole file."
-        )
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[win-edit-gate] {blocks[0]}"] + blocks[1:])
     return text if len(text) <= ADVISORY_MAX_CHARS else text[: ADVISORY_MAX_CHARS - 3] + "..."
 
 

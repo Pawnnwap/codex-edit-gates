@@ -279,14 +279,13 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     findings: list[str] = []
     if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff"):
         findings.append(
-            f"{name}: UTF-16 file - MATLAB R2021a and mh_lint cannot read it,"
-            " save as UTF-8 (no BOM)"
+            f"{name}: UTF-16 - MATLAB and mh_lint cannot read it; save as"
+            " UTF-8 (no BOM)"
         )
         return findings
     if blob.startswith(b"\xef\xbb\xbf"):
         findings.append(
-            f"{name}: UTF-8 BOM - mh_lint's lexer dies on it (lex error) and"
-            " fileread keeps U+FEFF in the char stream; save without BOM"
+            f"{name}: UTF-8 BOM - mh_lint lex-errors on it; save without BOM"
         )
     try:
         blob.decode("utf-8")
@@ -300,14 +299,12 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
         gbk_ok = False
     if not utf8_ok and not gbk_ok:
         findings.append(
-            f"{name}: bytes valid in neither UTF-8 nor GBK - the file mojibakes"
-            " under every reader"
+            f"{name}: valid in neither UTF-8 nor GBK - mojibake everywhere"
         )
     elif not utf8_ok and gbk_ok:
         findings.append(
-            f"{name}: GBK/CP936 only - R2021a reads it via the system codepage"
-            " here, but it breaks under R2021b+ (UTF-8 default) or any"
-            " non-CP936 machine; save as UTF-8"
+            f"{name}: GBK/CP936 only - breaks under R2021b+ or any non-CP936"
+            " machine; save as UTF-8"
         )
     return findings
 
@@ -638,7 +635,7 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[ml-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", syntax, 4)
     add("encoding", encoding)
@@ -646,7 +643,9 @@ def compose_advisory(
     add("note", notes, 4)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[ml-edit-gate] {blocks[0]}"] + blocks[1:])
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS
@@ -706,7 +705,7 @@ def check_file(
         pass  # deliberate kill switch, stay quiet
     elif checkcode_disabled_here(path):
         result["notes"].append(
-            f"{path.name}: checkcode skipped (.edit-gate-disable, advisory-only)"
+            f"{path.name}: checkcode skipped (.edit-gate-disable)"
         )
     elif (
         checkcode_budget > 0

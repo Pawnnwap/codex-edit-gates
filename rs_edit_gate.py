@@ -628,9 +628,8 @@ def compose_advisory(
     blocks: list[str] = []
     if fixed:
         blocks.append(
-            "[rs-edit-gate] AUTO-FIXED: " + "; ".join(fixed)
-            + ". RE-READ the file before your next patch and do not resubmit"
-            " the whole file: this gate edited it in place."
+            "AUTO-FIXED: " + "; ".join(fixed)
+            + ". File rewritten in place - re-read before next patch."
         )
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
@@ -638,15 +637,17 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[rs-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", parse_errors, 4)
     add("COMPILE ERRORS", errors, 5)
-    add("warnings (edited file only)", warnings, 4)
+    add("warnings", warnings, 4)
     add("note", notes, 3)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[rs-edit-gate] {blocks[0]}"] + blocks[1:])
     return text if len(text) <= ADVISORY_MAX_CHARS else text[: ADVISORY_MAX_CHARS - 3] + "..."
 
 

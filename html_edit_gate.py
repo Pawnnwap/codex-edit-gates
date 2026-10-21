@@ -287,8 +287,7 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     findings: list[str] = []
     if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff"):
         findings.append(
-            f"{name}: UTF-16 file - browsers and toolchains mishandle it, save"
-            " as UTF-8"
+            f"{name}: UTF-16 - browsers mishandle it; save as UTF-8"
         )
         return findings
 
@@ -313,32 +312,29 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     if declared in _UTF8_NAMES:
         if not utf8_ok:
             findings.append(
-                f"{name}: declares charset utf-8 but the bytes are not valid"
-                " UTF-8 - every reader will mojibake; fix the declaration or"
-                " the file"
+                f"{name}: declares utf-8 but the bytes are not valid UTF-8;"
+                " fix the declaration or the file"
             )
     elif declared in _GB_NAMES:
         if utf8_ok and has_non_ascii:
             findings.append(
-                f"{name}: declares charset {match.group(1)} but the bytes are"
-                " UTF-8 - every reader will mojibake; fix the declaration or"
-                " the file"
+                f"{name}: declares {match.group(1)} but the bytes are UTF-8;"
+                " fix the declaration or the file"
             )
 
     if not utf8_ok and not gbk_ok:
         findings.append(
-            f"{name}: bytes valid in neither UTF-8 nor GBK - the file mojibakes"
-            " under every reader"
+            f"{name}: valid in neither UTF-8 nor GBK - mojibake everywhere"
         )
     elif not utf8_ok and gbk_ok:
         if declared is None:
             findings.append(
-                f"{name}: GBK/CP936 only with no declared charset - browsers"
-                " guess and usually guess wrong; save as UTF-8 and declare it"
+                f"{name}: GBK/CP936 only with no declared charset - save as"
+                " UTF-8 and declare it"
             )
     elif has_non_ascii and declared is None:
         findings.append(
-            f"{name}: non-ASCII content with no declared charset - add"
+            f"{name}: non-ASCII with no declared charset - add"
             ' <meta charset="utf-8">'
         )
     return findings
@@ -457,14 +453,16 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[html-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", syntax, 4)
     add("encoding", encoding)
     add("note", notes, 4)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[html-edit-gate] {blocks[0]}"] + blocks[1:])
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS

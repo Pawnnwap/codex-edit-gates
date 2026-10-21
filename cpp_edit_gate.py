@@ -281,7 +281,7 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
     findings: list[str] = []
     if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff"):
         findings.append(
-            f"{name}: UTF-16 file - no compiler reads it, save as UTF-8"
+            f"{name}: UTF-16 - no compiler reads it; save as UTF-8"
         )
         return findings
     # A UTF-8 BOM is fine for C++ (MSVC uses it to detect UTF-8) - no finding.
@@ -297,23 +297,20 @@ def encoding_findings(blob: bytes, path: Path) -> list[str]:
         gbk_ok = False
     if not utf8_ok and not gbk_ok:
         findings.append(
-            f"{name}: bytes valid in neither UTF-8 nor GBK - the file mojibakes"
-            " under every reader"
+            f"{name}: valid in neither UTF-8 nor GBK - mojibake everywhere"
         )
     elif not utf8_ok and gbk_ok:
         findings.append(
-            f"{name}: GBK/CP936 only - MSVC reads it via the system codepage"
-            " here; it breaks with /utf-8 or on any non-CP936 machine, save as"
-            " UTF-8"
+            f"{name}: GBK/CP936 only - breaks with /utf-8 or on any non-CP936"
+            " machine; save as UTF-8"
         )
     else:
         has_non_ascii = any(byte > 127 for byte in blob)
         has_bom = blob.startswith(b"\xef\xbb\xbf")
         if has_non_ascii and not has_bom:
             findings.append(
-                f"{name}: non-ASCII in BOM-less UTF-8 - MSVC reads it as the"
-                " ANSI codepage and garbles string literals; add a BOM or"
-                " compile with /utf-8"
+                f"{name}: non-ASCII in BOM-less UTF-8 - MSVC garbles string"
+                " literals; add a BOM or compile with /utf-8"
             )
     return findings
 
@@ -466,14 +463,16 @@ def compose_advisory(
             return
         shown = items[:limit]
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
-        blocks.append(f"[cpp-edit-gate] {label}: " + " | ".join(shown) + tail)
+        blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
     add("DOES NOT PARSE", syntax, 4)
     add("encoding", encoding)
     add("note", notes, 4)
     if not blocks:
         return ""
-    text = "\n".join(blocks)
+    # Gate tag on the first line only - one advisory per tool call, a tag per
+    # block is pure repetition in the model's context.
+    text = "\n".join([f"[cpp-edit-gate] {blocks[0]}"] + blocks[1:])
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS
