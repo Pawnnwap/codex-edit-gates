@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-PYEXE = r"C:\Users\a\.conda\envs\work\python.exe"
+PYEXE = sys.executable
 GATES = Path(r"C:\Users\a\.codex\scripts")
 SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\home")  # throwaway HOME
 WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\ws")
@@ -17,7 +17,7 @@ shutil.rmtree(WS, ignore_errors=True)
 (SANDBOX / ".codex").mkdir(parents=True)
 WS.mkdir(parents=True)
 
-ENV = dict(os.environ, USERPROFILE=str(SANDBOX), PY_EDIT_GATE_LOG_DIR=str(SANDBOX / ".codex" / "logs"))
+ENV = dict(os.environ, USERPROFILE=str(SANDBOX), HOME=str(SANDBOX), PY_EDIT_GATE_LOG_DIR=str(SANDBOX / ".codex" / "logs"))
 
 
 def run_gate(script: str, payload: dict, argv: list[str] | None = None) -> tuple[int, str]:

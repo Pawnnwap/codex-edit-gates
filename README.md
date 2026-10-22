@@ -25,12 +25,16 @@ name, and hook timeouts kill the whole process tree.
 
 ## Deployment
 
-1. **Install scripts** — copy the four `*_edit_gate.py` files into
-   `~/.codex/scripts/`. They are standalone and stdlib-only; nothing else from
-   this repo is needed at runtime.
+1. **Install scripts** — copy the gate scripts (`*_edit_gate.py` and
+   `write_scan_gate.py`) into `~/.codex/scripts/`. They are standalone and
+   stdlib-only; nothing else from this repo is needed at runtime.
 2. **Register the hooks** — add one `[[hooks]]` block per gate to
    `~/.codex/config.toml` (see the exact set below). The interpreter path is
-   machine-specific: adjust it to where your Python lives.
+   machine-specific: adjust it to where your Python lives. The gates are
+   cross-platform (Windows + Linux/macOS): tool discovery is PATH-first with
+   per-OS fallback candidates, the ml gate picks the right process-tree kill
+   and console codepage per OS, and on Linux the same blocks use
+   `python3 ~/.codex/scripts/<gate>.py`.
 3. **Re-trust the hooks** — adding or editing a `[[hooks]]` block changes its
    trusted-hash identity, so codex silently disables that hook until you accept
    the trust prompt once in an interactive session. Without this step the gates

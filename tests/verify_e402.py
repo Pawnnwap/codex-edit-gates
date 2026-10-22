@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PYEXE = r"C:\Users\a\.conda\envs\work\python.exe"
+PYEXE = sys.executable
 GATE = Path(r"C:\Users\a\.codex\scripts\py_edit_gate.py")
 SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\home2")
 WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\ws2")
@@ -15,7 +15,7 @@ shutil.rmtree(SANDBOX, ignore_errors=True)
 shutil.rmtree(WS, ignore_errors=True)
 (SANDBOX / ".codex" / "logs").mkdir(parents=True)
 WS.mkdir(parents=True)
-ENV = dict(os.environ, USERPROFILE=str(SANDBOX))
+ENV = dict(os.environ, USERPROFILE=str(SANDBOX), HOME=str(SANDBOX))
 
 failures = []
 

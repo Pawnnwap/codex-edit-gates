@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PYEXE = r"C:\Users\a\.conda\envs\work\python.exe"
+PYEXE = sys.executable
 GATE = Path(r"C:\Users\a\.codex\scripts\rs_edit_gate.py")
 BASE = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\rsfix")
 

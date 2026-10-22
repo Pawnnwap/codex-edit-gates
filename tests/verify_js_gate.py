@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PYEXE = r"C:\Users\a\.conda\envs\work\python.exe"
+PYEXE = sys.executable
 GATE = Path(r"C:\Users\a\.codex\scripts\js_edit_gate.py")
 SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\jshome")
 WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\jsws")
@@ -31,7 +31,7 @@ def ctx_of(out: str) -> str:
 def fresh() -> dict:
     shutil.rmtree(SANDBOX, ignore_errors=True)
     (SANDBOX / ".codex").mkdir(parents=True)
-    return dict(os.environ, USERPROFILE=str(SANDBOX),
+    return dict(os.environ, USERPROFILE=str(SANDBOX), HOME=str(SANDBOX),
                 JS_EDIT_GATE_LOG_DIR=str(SANDBOX / ".codex" / "logs"))
 
 

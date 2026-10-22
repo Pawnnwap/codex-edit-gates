@@ -342,6 +342,9 @@ def parse_ts_output(stdout: str) -> list[str]:
 # ── Tool discovery ──────────────────────────────────────────────────────────
 NODE_CANDIDATES = [
     r"C:\Program Files\nodejs\node.exe",
+    "/usr/bin/node",
+    "/usr/local/bin/node",
+    "/opt/homebrew/bin/node",
 ]
 
 

@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-PYEXE = r"C:\Users\a\.conda\envs\work\python.exe"
+PYEXE = sys.executable
 GATE = Path(r"C:\Users\a\.codex\scripts\write_scan_gate.py")
 SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\scanhome")
 WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\scanws")
@@ -31,7 +31,7 @@ def ctx_of(out: str) -> str:
 def fresh() -> dict:
     shutil.rmtree(SANDBOX, ignore_errors=True)
     (SANDBOX / ".codex").mkdir(parents=True)
-    return dict(os.environ, USERPROFILE=str(SANDBOX),
+    return dict(os.environ, USERPROFILE=str(SANDBOX), HOME=str(SANDBOX),
                 WRITE_SCAN_GATE_LOG_DIR=str(SANDBOX / ".codex" / "logs"),
                 # keep the delegated gates quiet about their own env notes
                 ML_EDIT_GATE_CHECKCODE="0")

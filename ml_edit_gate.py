@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -353,6 +354,8 @@ KNOWN_INTERPRETERS = [
 MATLAB_GLOBS = [
     r"C:\Program Files\Polyspace\R*\bin\matlab.exe",
     r"C:\Program Files\MATLAB\R*\bin\matlab.exe",
+    "/usr/local/MATLAB/R*/bin/matlab",
+    "/opt/MATLAB/R*/bin/matlab",
 ]
 
 
@@ -412,16 +415,21 @@ class Tools:
         slots = {"mh_lint": "mh_lint", "matlab": "matlab"}
         if self._from_cache(slots, state):
             return
-        # mh_lint: PATH first, then known interpreters' install dirs (conda
-        # puts env exes at the root and tools in Scripts; venvs put both in
-        # Scripts, so try both layouts).
+        # mh_lint: PATH first, then known interpreters' install dirs (Windows
+        # conda puts env exes at the root and tools in Scripts; venvs put both
+        # in Scripts; POSIX pip puts them in bin - try every layout).
         found = shutil.which("mh_lint")
         if found:
             self.mh_lint = [found]
         else:
-            for interp in KNOWN_INTERPRETERS:
+            for interp in [sys.executable, *KNOWN_INTERPRETERS]:
                 base = Path(interp).parent
-                for candidate in (base / "mh_lint.exe", base / "Scripts" / "mh_lint.exe"):
+                for candidate in (
+                    base / "mh_lint.exe",
+                    base / "Scripts" / "mh_lint.exe",
+                    base / "bin" / "mh_lint",
+                    base / "bin" / "mh_lint.exe",
+                ):
                     if candidate.is_file():
                         self.mh_lint = [str(candidate)]
                         break
@@ -504,27 +512,34 @@ def _run_tree(cmd: list, timeout: float, cwd: Path) -> tuple[int | None, str]:
 
     subprocess' own timeout kill only reaps the direct child; matlab.exe is a
     launcher, so a bare kill orphans the real session, which then holds the
-    license and makes every later startup crawl. taskkill /T prevents that.
+    license and makes every later startup crawl. taskkill /T (Windows) or
+    killpg on a fresh session (POSIX) prevents that. The MATLAB console prints
+    in the system codepage on Windows (CP936 here) but UTF-8 on POSIX.
     """
+    posix = os.name != "nt"
     proc = subprocess.Popen(
         [str(c) for c in cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        encoding="gbk",
+        encoding="utf-8" if posix else "gbk",
         errors="replace",
         cwd=str(cwd),
+        start_new_session=posix,
     )
     try:
         out, _ = proc.communicate(timeout=timeout)
         return proc.returncode, out or ""
     except subprocess.TimeoutExpired:
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=10,
-            )
+            if posix:
+                os.killpg(os.getpgid(proc.pid), getattr(signal, "SIGKILL", 9))
+            else:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
         except Exception:
             try:
                 proc.kill()

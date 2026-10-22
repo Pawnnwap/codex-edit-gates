@@ -343,6 +343,9 @@ def parse_clang_output(stdout: str) -> tuple[list[str], list[str]]:
 # ── Tool discovery ──────────────────────────────────────────────────────────
 CLANG_GLOBS = [
     r"C:\Program Files\LLVM\bin\clang++.exe",
+    "/usr/bin/clang++",
+    "/usr/local/bin/clang++",
+    "/opt/homebrew/bin/clang++",
 ]
 
 
