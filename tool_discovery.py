@@ -269,11 +269,18 @@ def fs_walk_hits(name: str) -> list[str]:
 
 
 # ── resolution ──────────────────────────────────────────────────────────────
-def _verify(argv: list[str]) -> tuple[bool, str | None]:
+def _verify(name: str, argv: list[str]) -> tuple[bool, str | None]:
     """Cheap liveness probe; heavy interactive tools are existence-checked."""
     if argv and Path(str(argv[0])).name.lower().startswith("matlab"):
         return True, None
-    rc, out = _run_cli([str(a) for a in argv] + ["--version"], timeout=8.0)
+    # PowerShell 5.1 rejects `--version` (it is not a parameter), so probing
+    # it that way marks a perfectly working shell as missing. Probe what each
+    # tool actually understands.
+    if name in ("powershell", "pwsh"):
+        probe = ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]
+    else:
+        probe = ["--version"]
+    rc, out = _run_cli([str(a) for a in argv] + probe, timeout=8.0)
     if rc == 0:
         return True, None
     return False, (out.strip().splitlines()[-1] if out.strip() else f"exit {rc}")
@@ -317,7 +324,7 @@ def discover_one(name: str) -> dict:
             errors.append(f"{tier}: {error}")
         for hit in hits:
             for candidate in _candidates_for_hit(name, hit):
-                ok, problem = _verify(candidate)
+                ok, problem = _verify(name, candidate)
                 if ok:
                     return {"argv": candidate, "source": tier, "verified": True}
                 tried.append(" ".join(candidate))
@@ -329,7 +336,7 @@ def discover_one(name: str) -> dict:
         errors.append(error)
     for interp in interpreters[:6]:
         candidate = [interp, "-m", name]
-        ok, problem = _verify(candidate)
+        ok, problem = _verify(name, candidate)
         if ok:
             return {"argv": candidate, "source": "module", "verified": True}
         tried.append(f"{interp} -m {name}")
@@ -369,17 +376,28 @@ def warm_cache() -> dict:
     return record
 
 
+# Tools that satisfy the same capability: only report a gap when every member
+# of a group is missing (pwsh alone is fine while powershell works, and vice
+# versa - the win gate needs either).
+_TOOL_GROUPS = ({"powershell", "pwsh"},)
+
+
 def missing_notice(record: dict) -> str:
     """One stable line listing degraded tools - no timestamps, no durations."""
-    missing = sorted(
-        name for name, info in (record.get("tools") or {}).items()
-        if not info.get("argv")
-    )
-    if not missing:
+    tools = record.get("tools") or {}
+    missing = {name for name, info in tools.items() if not info.get("argv")}
+    labels: list[str] = []
+    for group in _TOOL_GROUPS:
+        if missing & group:
+            missing -= group
+            if not {name for name in group if (tools.get(name) or {}).get("argv")}:
+                labels.append("/".join(sorted(group)))
+    labels.extend(sorted(missing))
+    if not labels:
         return ""
     return (
         "[tool-discovery] not found: "
-        + ", ".join(missing)
+        + ", ".join(labels)
         + " - related checks and autofix run degraded"
     )
 

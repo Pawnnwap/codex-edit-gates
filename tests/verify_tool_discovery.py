@@ -100,14 +100,61 @@ env = base_env(PATH="", VIRTUAL_ENV="", CONDA_PREFIX="",
                TOOL_DISCOVERY_ROOTS=str(empty))
 rc, out = run_disc(["--session-start"], env)
 record = json.loads(run_disc(["--json"], env)[1])
-missing = sorted(n for n, i in (record.get("tools") or {}).items() if not i.get("argv"))
-notice = ("[tool-discovery] not found: " + ", ".join(missing)
-          + " - related checks and autofix run degraded") if missing else ""
+tools = record.get("tools") or {}
+missing = sorted(n for n, i in tools.items() if not i.get("argv"))
+# mirror the grouping rule: alternatives reported as one label only when all
+# members are missing
+labels = list(missing)
+grouped = [n for n in labels if n in ("powershell", "pwsh")]
+if grouped:
+    labels = [n for n in labels if n not in ("powershell", "pwsh")]
+    if not any((tools.get(n) or {}).get("argv") for n in ("powershell", "pwsh")):
+        labels.insert(0, "powershell/pwsh")
+notice = ("[tool-discovery] not found: " + ", ".join(labels)
+          + " - related checks and autofix run degraded") if labels else ""
 expected = json.dumps({"systemMessage": notice}, ensure_ascii=False) if notice else ""
 check("session-start notice matches the actual missing set (valid JSON)",
       out.strip() == expected, f"missing={missing} out={out[:140]!r}")
 rc, out = run_disc(["--find", "definitely-missing-xyz"], env)
 check("missing tool has stable reason", "not found" in (json.loads(out).get("error") or ""), out[:200])
+
+# ── 0d. tool-aware probe: PowerShell 5.1 rejects --version, just like this
+# fake shell does - the probe must use what the tool actually understands ────
+ps_fake = make_fake_tool("powershell")
+if os.name == "nt":
+    ps_fake.write_text(
+        chr(10).join(['@echo off', 'if "%~1"=="--version" exit /b 1', 'exit /b 0']) + chr(10),
+        encoding="utf-8",
+    )
+    sysdir = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32")
+else:
+    ps_fake.write_text(
+        chr(10).join(['#!/bin/sh', '[ "$1" = "--version" ] && exit 1', 'exit 0']) + chr(10),
+        encoding="utf-8",
+    )
+    ps_fake.chmod(ps_fake.stat().st_mode | stat.S_IXUSR)
+    sysdir = "/usr/bin" + os.pathsep + "/bin"
+env = base_env(PATH=str(FAKE) + os.pathsep + sysdir, VIRTUAL_ENV="", CONDA_PREFIX="",
+               TOOL_DISCOVERY_ROOTS=str(SANDBOX / "empty"))
+rc, out = run_disc(["--find", "powershell"], env)
+found = json.loads(out)
+check("powershell probed tool-aware (not with --version)",
+      found.get("verified") is True and found.get("argv"), out[:160])
+
+# ── 0e. alternative group: one of powershell/pwsh present -> not a gap ──────
+env = base_env(TOOL_DISCOVERY_FORCE_MISSING="powershell,pwsh",
+               TOOL_DISCOVERY_ROOTS=str(SANDBOX / "empty"))
+rc, out = run_disc(["--session-start"], env)
+check("both alternatives missing -> grouped notice", "powershell/pwsh" in out, out[:160])
+env = base_env(TOOL_DISCOVERY_FORCE_MISSING="pwsh",
+               TOOL_DISCOVERY_ROOTS=str(SANDBOX / "empty"))
+rc, out = run_disc(["--session-start"], env)
+record = json.loads(run_disc(["--json"], env)[1])
+ps_present = ((record.get("tools") or {}).get("powershell") or {}).get("argv")
+if ps_present:
+    check("one alternative present -> silent about the other", "pwsh" not in out, out[:160])
+else:
+    check("both alternatives missing -> grouped notice (fallback)", "powershell/pwsh" in out, out[:160])
 
 # ── 2a. gates read the session-start cache (sentinel proves no re-scan) ────
 fresh()
