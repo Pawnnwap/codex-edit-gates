@@ -2,7 +2,7 @@
 
 Codex lifecycle hooks (PostToolUse + Stop) that check, and where provably safe
 fix, the files a Codex session just edited. Registered globally in
-`~/.codex/config.toml`, so every session on this machine gets them. All seven
+`~/.codex/config.toml`, so every session on this machine gets them. All eight
 gates are stdlib-only, standalone, and fail open: any internal error means
 exit 0 with no output, so a broken gate can never break a session.
 
@@ -15,6 +15,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | `cpp_edit_gate.py` | encoding traps (UTF-16, MSVC's BOM-less non-ASCII codepage fallback, GBK-only), `clang++ -fsyntax-only` (parse-class errors only) | — (advisory-only) |
 | `js_edit_gate.py` | encoding traps (UTF-16, GBK-only), `node --check` (.js/.mjs/.cjs), `stripTypeScriptTypes` (.ts/.mts/.cts) | — (advisory-only) |
 | `html_edit_gate.py` | charset declaration vs bytes mismatches, no-charset non-ASCII, tag-stack structure (stray/mismatched/unclosed/dup attrs), strict XML for .xhtml | — (advisory-only, pure stdlib, ~1 ms) |
+| `write_scan_gate.py` | shell-write blind spot: snapshot-diffs the workspace on `exec_command`, delegates script-written files to their language gate | — (advisory-only) |
 
 Findings are reported as short advisories via
 `hookSpecificOutput.additionalContext` (PostToolUse) or `systemMessage` (Stop).
@@ -43,7 +44,8 @@ name, and hook timeouts kill the whole process tree.
    record appears in `~/.codex/logs/<gate>.jsonl`, then run the `tests/`
    suites below for the full synthetic matrix.
 
-The registration set is eight blocks. Every PostToolUse block uses the matcher
+The registration set is nine blocks. Every PostToolUse block except the
+write-scan one uses the matcher
 `apply_patch|Edit|Write|MultiEdit|edit_file|write_file`; one block as a
 template (the rest differ only in the command):
 
@@ -65,6 +67,7 @@ hooks = [
 | PostToolUse | `cpp_edit_gate.py` | 25 |
 | PostToolUse | `js_edit_gate.py` | 25 |
 | PostToolUse | `html_edit_gate.py` | 25 |
+| PostToolUse | `write_scan_gate.py` (matcher `exec_command`) | 60 |
 
 ## Operational notes
 
@@ -73,10 +76,10 @@ hooks = [
   command + timeout), not the script bytes: editing these scripts does NOT
   require re-trust, but touching a `[[hooks]]` block silently disables that
   hook until it is re-trusted in an interactive session.
-- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js,html}_edit_gate.jsonl` (+ `.state.json`).
+- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js,html,write_scan}_edit_gate.jsonl` (+ `.state.json`).
 - Kill switches:
   - env: `PY_EDIT_GATE=0`, `RS_EDIT_GATE=0`, `WIN_EDIT_GATE=0`, `ML_EDIT_GATE=0`,
-    `CPP_EDIT_GATE=0`, `JS_EDIT_GATE=0`, `HTML_EDIT_GATE=0`
+    `CPP_EDIT_GATE=0`, `JS_EDIT_GATE=0`, `HTML_EDIT_GATE=0`, `WRITE_SCAN_GATE=0`
   - stop-fix only: `RS_EDIT_GATE_AUTOFIX=0`
   - ml authoritative tier only: `ML_EDIT_GATE_CHECKCODE=0` (no matlab spawn)
   - per project: a `.edit-gate-disable` marker file (advisories only; it also
@@ -113,6 +116,7 @@ python tests/verify_ml_gate.py     # ml: encoding tier, mh_lint, checkcode tier,
 python tests/verify_cpp_gate.py    # cpp: encoding traps, clang++ parse whitelist, marker, determinism
 python tests/verify_js_gate.py     # js: encoding, node --check, TS strip probe, marker, determinism
 python tests/verify_html_gate.py   # html: charset mismatches, tag-stack anti-false-positive battery, determinism
+python tests/verify_write_scan.py  # scan: snapshot diff, script-write detection, delegation, --force
 ```
 
 They target the installed copies under `~/.codex/scripts`; adjust `GATE` in
