@@ -156,6 +156,28 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _shared_tools() -> dict:
+    """Tool argvs from tool_discovery's session-start scan (fast path).
+    Returns {"__error__": msg} when the cache is unreadable - never silent."""
+    try:
+        data = json.loads(
+            (_log_dir() / "tool_discovery.json").read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return {}  # not warmed yet - normal before the first session start
+    except Exception as exc:
+        return {"__error__": f"tool cache unreadable: {type(exc).__name__}: {exc}"}
+    if not isinstance(data, dict):
+        return {"__error__": "tool cache unreadable: not an object"}
+    try:
+        if time.time() - float(data.get("ts", 0)) > 12 * 3600:
+            return {}
+    except (TypeError, ValueError):
+        return {}
+    tools = data.get("tools")
+    return tools if isinstance(tools, dict) else {}
+
+
 def _sha1(text) -> str:
     if isinstance(text, bytes):
         data = text
@@ -340,12 +362,32 @@ def parse_ts_output(stdout: str) -> list[str]:
 
 
 # ── Tool discovery ──────────────────────────────────────────────────────────
-NODE_CANDIDATES = [
-    r"C:\Program Files\nodejs\node.exe",
-    "/usr/bin/node",
-    "/usr/local/bin/node",
-    "/opt/homebrew/bin/node",
-]
+def _program_bases() -> list[Path]:
+    """Standard install bases from the environment, never hardcoded."""
+    bases: list[Path] = []
+    if os.name == "nt":
+        for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            value = os.environ.get(var)
+            if value:
+                bases.append(Path(value))
+    else:
+        for entry in (os.environ.get("PATH") or "").split(os.pathsep):
+            if entry:
+                bases.append(Path(entry))
+    return bases
+
+
+def _node_candidates() -> list[str]:
+    """node on PATH first, else vendor layouts beneath detected bases."""
+    out: list[str] = []
+    found = shutil.which("node")
+    if found:
+        out.append(found)
+    for base in _program_bases():
+        candidate = base / "nodejs" / "node.exe"
+        if candidate.is_file() and str(candidate) not in out:
+            out.append(str(candidate))
+    return out
 
 
 def _run(cmd: list, timeout: float):
@@ -369,6 +411,7 @@ class Tools:
     def __init__(self, state: dict | None = None) -> None:
         self.node: list | None = None
         self.tier = "encoding-only"
+        self.shared_error = ""
         self._discover({} if state is None else state)
 
     def _from_cache(self, state: dict) -> bool:
@@ -393,18 +436,27 @@ class Tools:
     def _discover(self, state: dict) -> None:
         if self._from_cache(state):
             return
-        found = shutil.which("node")
-        if found and Path(found).is_file():
-            self.node = [found]
-        else:
-            for candidate in NODE_CANDIDATES:
-                if Path(candidate).is_file():
-                    self.node = [candidate]
-                    break
+        candidates = _node_candidates()
+        if candidates:
+            self.node = [candidates[0]]
         if self.node:
             proc = _run([*self.node, "--version"], 5.0)
             if not proc or proc.returncode != 0:
                 self.node = None
+        # The session-start scan is authoritative: it swept the machine once,
+        # so its verdict wins over whatever this run probed - including an
+        # explicit "missing", which must stay missing until the next sweep.
+        shared = _shared_tools()
+        if isinstance(shared, dict):
+            self.shared_error = str(shared.get("__error__") or "")
+            for name in ("node",):
+                info = shared.get(name)
+                if not isinstance(info, dict):
+                    continue
+                if info.get("argv"):
+                    setattr(self, name, [str(part) for part in info["argv"]])
+                else:
+                    setattr(self, name, None)
         self.tier = "node" if self.node else "encoding-only"
         state["tools"] = {
             "ts": time.time(),
@@ -529,12 +581,14 @@ def check_file(
         return result
 
     result["encoding"] = encoding_findings(blob, path)
+    if getattr(tools, "shared_error", ""):
+        result["notes"].append(str(tools.shared_error))
 
     suffix = path.suffix.lower()
     if suffix in JSX_SUFFIXES:
         return result  # no JSX parser on this box: encoding only
     if tools.node is None:
-        note_sink.append(f"{path.name}: node unavailable, syntax tier skipped")
+        result["notes"].append(f"{path.name}: node unavailable - syntax check degraded")
     elif syntax_disabled_here(path):
         result["notes"].append(f"{path.name}: syntax check skipped (.edit-gate-disable)")
     elif _now() < deadline:
@@ -553,6 +607,25 @@ def check_file(
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[js-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[js-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     started = _now()
     if os.environ.get("JS_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
@@ -563,7 +636,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -621,6 +696,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)

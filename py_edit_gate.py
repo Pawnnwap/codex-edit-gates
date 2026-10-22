@@ -320,6 +320,28 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _shared_tools() -> dict:
+    """Tool argvs from tool_discovery's session-start scan (fast path).
+    Returns {"__error__": msg} when the cache is unreadable - never silent."""
+    try:
+        data = json.loads(
+            (_log_dir() / "tool_discovery.json").read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return {}  # not warmed yet - normal before the first session start
+    except Exception as exc:
+        return {"__error__": f"tool cache unreadable: {type(exc).__name__}: {exc}"}
+    if not isinstance(data, dict):
+        return {"__error__": "tool cache unreadable: not an object"}
+    try:
+        if time.time() - float(data.get("ts", 0)) > 12 * 3600:
+            return {}
+    except (TypeError, ValueError):
+        return {}
+    tools = data.get("tools")
+    return tools if isinstance(tools, dict) else {}
+
+
 def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -412,11 +434,110 @@ def skip_reason(path: Path) -> str:
 
 
 # ── Tool discovery ──────────────────────────────────────────────────────────
-KNOWN_INTERPRETERS = [
-    r"E:\pyprojects\super-opencode\venv\Scripts\python.exe",
-    r"C:\Users\a\.conda\envs\work\python.exe",
-    r"C:\Users\a\.conda\envs\ic\python.exe",
-]
+def interpreter_candidates() -> list[str]:
+    """Python interpreters to probe for -m tools: the running one, PATH, and
+    any active venv/conda env - all derived from the system, never hardcoded."""
+    out: list[str] = [sys.executable]
+    for name in ("python", "python3"):
+        found = shutil.which(name)
+        if found and found not in out:
+            out.append(found)
+    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        base = os.environ.get(var)
+        if not base:
+            continue
+        for rel in ("Scripts/python.exe", "bin/python", "bin/python3"):
+            candidate = Path(base) / rel
+            if candidate.is_file() and str(candidate) not in out:
+                out.append(str(candidate))
+    return out
+
+
+# Tool executables in standard tool dirs (a venv's Scripts, a user's bin)
+# anywhere on the system - found by a bounded breadth-first probe instead of
+# any hardcoded location. Directories are listed at most two levels deep and
+# env-shaped subdirectories are probed with a few cheap stats; a wall-clock
+# deadline bounds the worst case. Runs only on cold discovery; the result is
+# cached in state for an hour.
+_TOOL_FILENAMES = ("ruff", "pyflakes", "bandit")
+_FS_TOOL_DIRS_CACHE: list[str] | None = None
+_FS_PRUNE = {
+    "windows", "winsxs", "$recycle.bin", "system volume information",
+    "appdata", "programdata", "node_modules", ".git", "site-packages",
+    "windowsapps", "packages", "documents", "downloads", "desktop",
+    "pictures", "videos", "music", "onedrive",
+}
+_FS_ENV_NAMES = {"venv", ".venv", "env", "virtualenv", "envs"}
+
+
+def _fs_tool_dirs() -> list[str]:
+    global _FS_TOOL_DIRS_CACHE
+    if _FS_TOOL_DIRS_CACHE is not None:
+        return _FS_TOOL_DIRS_CACHE
+    if os.name == "nt":
+        roots = [f"{letter}:\\" for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{letter}:\\")]
+        tool_dir_names = ("scripts", "bin")
+        filenames = [f"{tool}.exe" for tool in _TOOL_FILENAMES]
+    else:
+        roots = [str(Path.home())]
+        tool_dir_names = ("bin",)
+        filenames = list(_TOOL_FILENAMES)
+    found: list[str] = []
+    per_root_budget = max(2.0, 9.0 / max(1, len(roots)))
+
+    def probe_env_dir(candidate: Path) -> None:
+        for tool_dir in tool_dir_names:
+            directory = candidate / tool_dir
+            for filename in filenames:
+                if (directory / filename).is_file() and str(directory) not in found:
+                    found.append(str(directory))
+
+    def probe_env_container(container: Path) -> None:
+        """A conda-style envs/<name> container: probe each env under it."""
+        try:
+            for env in container.iterdir():
+                if env.is_dir():
+                    probe_env_dir(env)
+        except OSError:
+            pass
+
+    for root in roots:
+        deadline = time.monotonic() + per_root_budget
+        frontier = [Path(root)]
+        depth = 0
+        while frontier and depth < 2 and time.monotonic() < deadline and len(found) < 6:
+            next_frontier: list[Path] = []
+            for current in frontier:
+                if time.monotonic() > deadline or len(found) >= 6:
+                    break
+                try:
+                    with os.scandir(current) as entries:
+                        subdirs = [
+                            Path(entry.path)
+                            for entry in entries
+                            if entry.is_dir(follow_symlinks=False)
+                            and entry.name.lower() not in _FS_PRUNE
+                        ]
+                except OSError:
+                    continue
+                for sub in subdirs:
+                    if time.monotonic() > deadline or len(found) >= 6:
+                        break
+                    name = sub.name.lower()
+                    if name in _FS_ENV_NAMES:
+                        probe_env_dir(sub)
+                    else:
+                        # An env-shaped dir may hide one level down (a project's
+                        # venv): a handful of cheap stats, no deep listing.
+                        for env_name in _FS_ENV_NAMES:
+                            probe_env_dir(sub / env_name)
+                        probe_env_container(sub / "envs")
+                        probe_env_container(sub / ".conda" / "envs")
+                        next_frontier.append(sub)
+            frontier = next_frontier
+            depth += 1
+    _FS_TOOL_DIRS_CACHE = found
+    return found
 
 
 def _run(cmd: list, timeout: float):
@@ -442,6 +563,7 @@ class Tools:
         self.pyflakes: list | None = None
         self.bandit: list | None = None
         self.tier = "syntax-only"
+        self.shared_error = ""
         # `state or {}` would fork an empty dict and lose the cache write.
         self._discover({} if state is None else state)
 
@@ -481,9 +603,9 @@ class Tools:
             found = shutil.which(name)
             if found:
                 candidates.append([found])
-        # No `python` on PATH on this box, so probe known interpreters directly.
+        # No `python` on PATH on some boxes, so probe interpreters directly.
         for name in slots:
-            for interp in [sys.executable, *KNOWN_INTERPRETERS]:
+            for interp in interpreter_candidates():
                 if interp and Path(interp).is_file():
                     candidates.append([interp, "-m", name])
         for argv in candidates:
@@ -493,6 +615,46 @@ class Tools:
             proc = _run([*argv, "--version"], TOOL_TIMEOUT)
             if proc and proc.returncode == 0:
                 setattr(self, slot, argv)
+        # Filesystem fallback: tool executables in any standard tool dir on the
+        # system (a venv's Scripts, a user's bin), plus their sibling or parent
+        # interpreter as a -m runner. No location is assumed.
+        for name in slots:
+            if getattr(self, name) is not None:
+                continue
+            for directory in _fs_tool_dirs():
+                base = Path(directory)
+                for filename in (f"{name}.exe", name):
+                    candidate = base / filename
+                    if candidate.is_file():
+                        setattr(self, name, [str(candidate)])
+                        break
+                else:
+                    for interp in (
+                        base / "python.exe", base / "python", base / "python3",
+                        base.parent / "python.exe", base.parent / "python",
+                    ):
+                        if not interp.is_file():
+                            continue
+                        proc = _run([str(interp), "-m", name, "--version"], TOOL_TIMEOUT)
+                        if proc and proc.returncode == 0:
+                            setattr(self, name, [str(interp), "-m", name])
+                            break
+                if getattr(self, name) is not None:
+                    break
+        # The session-start scan is authoritative: it swept the machine once,
+        # so its verdict wins over whatever this run probed - including an
+        # explicit "missing", which must stay missing until the next sweep.
+        shared = _shared_tools()
+        if isinstance(shared, dict):
+            self.shared_error = str(shared.get("__error__") or "")
+            for name in ("ruff", "pyflakes", "bandit"):
+                info = shared.get(name)
+                if not isinstance(info, dict):
+                    continue
+                if info.get("argv"):
+                    setattr(self, name, [str(part) for part in info["argv"]])
+                else:
+                    setattr(self, name, None)
         self.tier = (
             "+".join(n for n in ("ruff", "pyflakes", "bandit") if getattr(self, n))
             or "syntax-only"
@@ -985,14 +1147,12 @@ def auto_imports(tools: Tools, path: Path) -> list[str]:
 
 
 # ── Advisory composition ────────────────────────────────────────────────────
-# Notes about tool state or wall-clock behaviour, not about the file. They
-# differ across retries of the same edit, which would make the injected
-# context prefix diverge (prefill cache misses), so they are split off at the
-# compose boundary and land in the audit log instead of the advisory.
-_VOLATILE_NOTE_RE = re.compile(
-    r"timed out|time cap|unavailable|did not run|produced no output"
-    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
-)
+# Notes that always differ across retries (budget/duration text) would make
+# the injected context prefix diverge (prefill cache misses), so they are split
+# off at the compose boundary and land in the audit log. Everything else -
+# findings, missing-tool degradation, errors - is stable given machine and
+# file state and reaches the model.
+_VOLATILE_NOTE_RE = re.compile(r"time cap|truncated|in \d+(?:\.\d+)?s\b")
 
 
 def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
@@ -1071,6 +1231,11 @@ def check_file(
     if not _writable(path):
         allow_fix = False
         result["notes"].append(f"{path.name}: read-only, fixes skipped")
+    missing = [n for n in ("ruff", "pyflakes", "bandit") if getattr(tools, n, None) is None]
+    if missing:
+        result["notes"].append(f"{', '.join(missing)} unavailable - lint and autofix degraded")
+    if getattr(tools, "shared_error", ""):
+        result["notes"].append(str(tools.shared_error))
 
     if allow_fix and _now() < deadline:
         result["fixed"] = safe_autofix(tools, path, allow_format)
@@ -1135,6 +1300,25 @@ def _now() -> float:
     return time.monotonic()
 
 
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[py-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[py-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     started = _now()
     if os.environ.get("PY_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
@@ -1145,7 +1329,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -1236,6 +1422,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)

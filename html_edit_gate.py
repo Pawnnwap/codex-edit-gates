@@ -510,6 +510,25 @@ def check_file(path: Path) -> dict:
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[html-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[html-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     started = _now()
     if os.environ.get("HTML_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
@@ -520,7 +539,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -575,6 +596,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)

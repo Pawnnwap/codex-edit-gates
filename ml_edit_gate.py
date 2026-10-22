@@ -168,6 +168,28 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _shared_tools() -> dict:
+    """Tool argvs from tool_discovery's session-start scan (fast path).
+    Returns {"__error__": msg} when the cache is unreadable - never silent."""
+    try:
+        data = json.loads(
+            (_log_dir() / "tool_discovery.json").read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return {}  # not warmed yet - normal before the first session start
+    except Exception as exc:
+        return {"__error__": f"tool cache unreadable: {type(exc).__name__}: {exc}"}
+    if not isinstance(data, dict):
+        return {"__error__": "tool cache unreadable: not an object"}
+    try:
+        if time.time() - float(data.get("ts", 0)) > 12 * 3600:
+            return {}
+    except (TypeError, ValueError):
+        return {}
+    tools = data.get("tools")
+    return tools if isinstance(tools, dict) else {}
+
+
 def _sha1(text) -> str:
     if isinstance(text, bytes):
         data = text
@@ -345,18 +367,60 @@ def parse_checkcode_output(text: str) -> list[tuple[int, int, str]]:
 
 
 # ── Tool discovery ──────────────────────────────────────────────────────────
-KNOWN_INTERPRETERS = [
-    r"E:\pyprojects\super-opencode\venv\Scripts\python.exe",
-    r"C:\Users\a\.conda\envs\work\python.exe",
-    r"C:\Users\a\.conda\envs\ic\python.exe",
-]
+def interpreter_candidates() -> list[str]:
+    """Python interpreters to probe: the running one, PATH, active envs."""
+    out: list[str] = [sys.executable]
+    for name in ("python", "python3"):
+        found = shutil.which(name)
+        if found and found not in out:
+            out.append(found)
+    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        base = os.environ.get(var)
+        if not base:
+            continue
+        for rel in ("Scripts/python.exe", "bin/python", "bin/python3"):
+            candidate = Path(base) / rel
+            if candidate.is_file() and str(candidate) not in out:
+                out.append(str(candidate))
+    return out
 
-MATLAB_GLOBS = [
-    r"C:\Program Files\Polyspace\R*\bin\matlab.exe",
-    r"C:\Program Files\MATLAB\R*\bin\matlab.exe",
-    "/usr/local/MATLAB/R*/bin/matlab",
-    "/opt/MATLAB/R*/bin/matlab",
-]
+
+def _program_bases() -> list[Path]:
+    """Standard install bases from the environment, never hardcoded: the
+    Windows program-file env vars, or PATH entries (plus their prefix parents,
+    which cover prefix-style installs) on POSIX."""
+    bases: list[Path] = []
+    if os.name == "nt":
+        for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            value = os.environ.get(var)
+            if value:
+                bases.append(Path(value))
+    else:
+        for entry in (os.environ.get("PATH") or "").split(os.pathsep):
+            if entry:
+                bases.append(Path(entry))
+                bases.append(Path(entry).parent)
+        bases.append(Path.home() / ".local" / "bin")
+    return bases
+
+
+def _matlab_candidates() -> list[str]:
+    """matlab on PATH first, else vendor install layouts beneath the detected
+    bases (release directories like R2024a are globbed)."""
+    out: list[str] = []
+    found = shutil.which("matlab")
+    if found:
+        out.append(found)
+    if os.name == "nt":
+        layouts = ("MATLAB/R*/bin/matlab.exe", "Polyspace/R*/bin/matlab.exe")
+    else:
+        layouts = ("MATLAB/R*/bin/matlab", "matlab/R*/bin/matlab")
+    for base in _program_bases():
+        for rel in layouts:
+            for candidate in sorted(glob.glob(str(base / rel))):
+                if Path(candidate).is_file() and candidate not in out:
+                    out.append(candidate)
+    return out
 
 
 def _run(cmd: list, timeout: float, env: dict | None = None):
@@ -382,6 +446,7 @@ class Tools:
         self.mh_lint: list | None = None
         self.matlab: list | None = None
         self.tier = "encoding-only"
+        self.shared_error = ""
         self._discover({} if state is None else state)
 
     def _from_cache(self, slots: dict, state: dict) -> bool:
@@ -422,7 +487,7 @@ class Tools:
         if found:
             self.mh_lint = [found]
         else:
-            for interp in [sys.executable, *KNOWN_INTERPRETERS]:
+            for interp in interpreter_candidates():
                 base = Path(interp).parent
                 for candidate in (
                     base / "mh_lint.exe",
@@ -439,18 +504,24 @@ class Tools:
             proc = _run([*self.mh_lint, "--version"], MH_TIMEOUT)
             if not proc or proc.returncode != 0:
                 self.mh_lint = None
-        # matlab: PATH first, then the install-dir globs seen on this box.
-        found = shutil.which("matlab")
-        if found and Path(found).is_file():
-            self.matlab = [found]
-        else:
-            for pattern in MATLAB_GLOBS:
-                for candidate in sorted(glob.glob(pattern)):
-                    if Path(candidate).is_file():
-                        self.matlab = [str(candidate)]
-                        break
-                if self.matlab:
-                    break
+        # matlab: PATH first, else vendor layouts beneath detected bases.
+        candidates = _matlab_candidates()
+        if candidates:
+            self.matlab = [candidates[0]]
+        # The session-start scan is authoritative: it swept the machine once,
+        # so its verdict wins over whatever this run probed - including an
+        # explicit "missing", which must stay missing until the next sweep.
+        shared = _shared_tools()
+        if isinstance(shared, dict):
+            self.shared_error = str(shared.get("__error__") or "")
+            for name in ("mh_lint", "matlab"):
+                info = shared.get(name)
+                if not isinstance(info, dict):
+                    continue
+                if info.get("argv"):
+                    setattr(self, name, [str(part) for part in info["argv"]])
+                else:
+                    setattr(self, name, None)
         self.tier = (
             "+".join(n for n in ("mh_lint", "matlab") if getattr(self, n))
             or "encoding-only"
@@ -586,9 +657,9 @@ def checkcode_findings(
     except Exception as exc:
         return [], f"checkcode did not run ({type(exc).__name__})"
     if rc is None:
-        return [], f"checkcode timed out after {MATLAB_TIMEOUT:.0f}s (tree killed)"
+        return [], "checkcode timed out - tree killed"
     if not out_file.is_file():
-        return [], f"checkcode produced no output (rc={rc}) {_tail.strip()[-300:]}"
+        return [], f"checkcode failed (rc={rc})"
     try:
         text = out_file.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -622,8 +693,7 @@ def checkcode_due(state: dict, path: Path, blob: bytes) -> bool:
 # context prefix diverge (prefill cache misses), so they are split off at the
 # compose boundary and land in the audit log instead of the advisory.
 _VOLATILE_NOTE_RE = re.compile(
-    r"timed out|time cap|unavailable|did not run|produced no output"
-    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
+    r"time cap|truncated|in \d+(?:\.\d+)?s\b"
 )
 
 
@@ -701,6 +771,8 @@ def check_file(
         return result, 0
 
     result["encoding"] = encoding_findings(blob, path)
+    if getattr(tools, "shared_error", ""):
+        result["notes"].append(str(tools.shared_error))
 
     if tools.mh_lint is None:
         result["notes"].append(f"{path.name}: mh_lint unavailable, fast lint skipped")
@@ -746,6 +818,25 @@ def check_file(
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[ml-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[ml-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     started = _now()
     if os.environ.get("ML_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
@@ -756,7 +847,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -830,6 +923,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)

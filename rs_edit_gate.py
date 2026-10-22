@@ -604,8 +604,7 @@ def clippy_fix_guarded(
 # context prefix diverge (prefill cache misses), so they are split off at the
 # compose boundary and land in the audit log instead of the advisory.
 _VOLATILE_NOTE_RE = re.compile(
-    r"timed out|time cap|unavailable|did not run|produced no output"
-    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
+    r"time cap|truncated|in \d+(?:\.\d+)?s\b"
 )
 
 
@@ -830,6 +829,25 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
     )
 
 
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[rs-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[rs-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     if os.environ.get("RS_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
         return 0
@@ -838,7 +856,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -856,6 +876,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)

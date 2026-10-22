@@ -16,6 +16,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | `js_edit_gate.py` | encoding traps (UTF-16, GBK-only), `node --check` (.js/.mjs/.cjs), `stripTypeScriptTypes` (.ts/.mts/.cts) | — (advisory-only) |
 | `html_edit_gate.py` | charset declaration vs bytes mismatches, no-charset non-ASCII, tag-stack structure (stray/mismatched/unclosed/dup attrs), strict XML for .xhtml | — (advisory-only, pure stdlib, ~1 ms) |
 | `write_scan_gate.py` | shell-write blind spot: snapshot-diffs the workspace on `exec_command`, delegates script-written files to their language gate | — (advisory-only) |
+| `tool_discovery.py` | session-start environment scan (CLI `where`/`which`/`py -0p`, env layouts, fs-walk fallback), shared tool cache | — (detection only) |
 
 Findings are reported as short advisories via
 `hookSpecificOutput.additionalContext` (PostToolUse) or `systemMessage` (Stop).
@@ -48,7 +49,7 @@ name, and hook timeouts kill the whole process tree.
    record appears in `~/.codex/logs/<gate>.jsonl`, then run the `tests/`
    suites below for the full synthetic matrix.
 
-The registration set is nine blocks. Every PostToolUse block except the
+The registration set is ten blocks. Every PostToolUse block except the
 write-scan one uses the matcher
 `apply_patch|Edit|Write|MultiEdit|edit_file|write_file`; one block as a
 template (the rest differ only in the command):
@@ -57,7 +58,7 @@ template (the rest differ only in the command):
 [[hooks.PostToolUse]]
 matcher = "apply_patch|Edit|Write|MultiEdit|edit_file|write_file"
 hooks = [
-  { type = "command", command = 'C:\Users\a\.conda\envs\work\python.exe C:\Users\a\.codex\scripts\py_edit_gate.py', timeout = 25 },
+  { type = "command", command = 'python ~/.codex/scripts/py_edit_gate.py', timeout = 25 },
 ]
 ```
 
@@ -72,6 +73,7 @@ hooks = [
 | PostToolUse | `js_edit_gate.py` | 25 |
 | PostToolUse | `html_edit_gate.py` | 25 |
 | PostToolUse | `write_scan_gate.py` (matcher `exec_command`) | 60 |
+| SessionStart | `tool_discovery.py --session-start` | 60 |
 
 ## Operational notes
 
@@ -92,12 +94,20 @@ hooks = [
   - CLI in the hook command: `--no-autofix` (and `--format` to opt in to
     whole-file formatters)
 - Prefill-cache-friendly output: the advisory is a deterministic function of
-  the file bytes - an identical file yields an identical message byte for byte
-  (asserted in the test suites), so retries, forks, and rewinds never diverge
-  the cached context prefix. Environment-dependent text (tool unavailable,
-  timeouts, wall-clock caps, per-run durations) is excluded from advisories and
-  recorded in the audit log's `skipped` field instead, and repeated identical
-  verdicts are deduplicated (6 h TTL) to keep injected context small.
+  the file bytes and machine state - an identical file yields an identical
+  message byte for byte (asserted in the test suites), so retries, forks, and
+  rewinds never diverge the cached context prefix. Only budget/duration text
+  (time caps, run durations) stays out of advisories (audit `skipped` field);
+  missing tools and internal errors DO surface as brief stable notes - silent
+  degradation and silent exception swallowing are forbidden. Repeated
+  identical verdicts are deduplicated (6 h TTL) to keep injected context small.
+- Tool detection (`tool_discovery.py`, warmed by the SessionStart hook into
+  `~/.codex/logs/tool_discovery.json`): system CLI first (`where`/`which -a`,
+  `py -0p`), env-derived install layouts second, a bounded filesystem walk as
+  the fallback only. The gates read the cache and never re-scan per edit; an
+  explicitly-missing tool stays missing until the next sweep, and the
+  degradation ("X unavailable - lint and autofix degraded") is reported to the
+  model rather than hidden.
 - ml notes: MATLAB R2021a reads .m files correctly as UTF-8 or CP936 (system
   codepage), so the encoding tier only flags what actually breaks (UTF-16, the
   UTF-8 BOM - mh_lint's lexer dies on it - GBK-only files that leave this box,
@@ -121,6 +131,7 @@ python tests/verify_cpp_gate.py    # cpp: encoding traps, clang++ parse whitelis
 python tests/verify_js_gate.py     # js: encoding, node --check, TS strip probe, marker, determinism
 python tests/verify_html_gate.py   # html: charset mismatches, tag-stack anti-false-positive battery, determinism
 python tests/verify_write_scan.py  # scan: snapshot diff, script-write detection, delegation, --force
+python tests/verify_tool_discovery.py  # discovery: CLI-first, walk fallback, visible errors, startup cache, cache-hit safety
 ```
 
 They target the installed copies under `~/.codex/scripts`; adjust `GATE` in

@@ -55,8 +55,6 @@ PS_SUFFIXES = {".ps1", ".psm1", ".psd1"}
 BATCH_SUFFIXES = {".cmd", ".bat"}
 WATCHED_SUFFIXES = PS_SUFFIXES | BATCH_SUFFIXES
 
-POWERShell_FALLBACK = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-
 _IGNORE_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "target",
     "build", "dist", ".idea", ".vscode",
@@ -152,7 +150,14 @@ def shell_exe() -> str | None:
         found = shutil.which(name)
         if found:
             return found
-    return POWERShell_FALLBACK if Path(POWERShell_FALLBACK).is_file() else None
+    # Windows PowerShell lives at a fixed layout beneath the system root the
+    # environment provides - no hardcoded drive or Windows directory.
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    if root:
+        fallback = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if fallback.is_file():
+            return str(fallback)
+    return None
 
 
 def autofix_disabled_here(path: Path) -> bool:
@@ -409,8 +414,7 @@ def lint_powershell(path: Path) -> tuple[list[str], str]:
 # context prefix diverge (prefill cache misses), so they are split off at the
 # compose boundary and land in the audit log instead of the advisory.
 _VOLATILE_NOTE_RE = re.compile(
-    r"timed out|time cap|unavailable|did not run|produced no output"
-    r"|not writable|output unreadable|truncated|in \d+(?:\.\d+)?s\b"
+    r"time cap|truncated|in \d+(?:\.\d+)?s\b"
 )
 
 
@@ -467,6 +471,25 @@ def _emit(advisory: str) -> None:
     sys.stdout.write("\n")
 
 
+def _emit_error(exc: Exception) -> None:
+    """Fail open, but never silently: one brief error line to the advisory."""
+    try:
+        message = f"[win-edit-gate]: internal error: {type(exc).__name__}: {exc}"[:300]
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                },
+                "systemMessage": message[:200],
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    except Exception:
+        sys.stderr.write(f"[win-edit-gate]: internal error: {type(exc).__name__}: {exc}\n")
+
+
 def main(argv: list[str]) -> int:
     started = _now()
     if os.environ.get("WIN_EDIT_GATE", "1").strip().lower() in ("0", "off", "false"):
@@ -476,7 +499,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:
+    except Exception as exc:
+        audit({"error": f"payload unreadable: {type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -557,6 +582,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except Exception as exc:  # fail open, always
+    except Exception as exc:  # fail open, but visibly
         audit({"error": f"{type(exc).__name__}: {exc}"})
+        _emit_error(exc)
         sys.exit(0)
