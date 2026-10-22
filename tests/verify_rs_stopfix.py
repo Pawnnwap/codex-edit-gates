@@ -70,8 +70,20 @@ advisory = run_stop(crate1)
 after1 = (crate1 / "src" / "lib.rs").read_text(encoding="utf-8")
 check("unused import removed", "use std::io;" not in after1, after1[:90])
 check("bool_comparison fixed", "== true" not in after1, after1[:120])
-check("fully-handled fix run stays silent", advisory.strip() == "", advisory[:180])
+check("fully-handled + line shift: minimal note only",
+      json.loads(advisory).get("systemMessage") == "[rs-edit-gate] AUTO-FIXED: line numbers shifted - re-read before next patch",
+      advisory[:180])
 check("crate still compiles", sh("cargo", "check", "--offline", cwd=crate1).returncode == 0)
+
+# 1b. in-place-only fix (line numbers hold) -> completely silent
+crate1b = make_crate(
+    "case1b",
+    "pub fn decision(flag: bool) -> u32 {\n    if flag == true {\n        1\n    } else {\n        0\n    }\n}\n",
+)
+advisory = run_stop(crate1b)
+after1b = (crate1b / "src" / "lib.rs").read_text(encoding="utf-8")
+check("in-place fix applied", "== true" not in after1b, after1b[:90])
+check("fully-handled + no shift: silent", advisory.strip() == "", advisory[:180])
 state1 = json.loads((crate1 / "_gatelogs" / "rs_edit_gate.state.json").read_text())
 check("clippy state recorded", any(k.startswith("clippy:") for k in state1), str(list(state1))[:120])
 
@@ -123,7 +135,8 @@ advisory = run_stop(crate6)
 after6 = (crate6 / "src" / "lib.rs").read_text(encoding="utf-8")
 check("partial: fixable part fixed", "use std::io;" not in after6, after6[:90])
 check("partial: advisory reports what remains",
-      "AUTO-FIXED" in advisory and "too many arguments" in advisory, advisory[:220])
+      "line numbers shifted" in advisory and "too many arguments" in advisory
+      and "machine-applicable" not in advisory, advisory[:220])
 
 print()
 print("FAILURES:", failures if failures else "none")

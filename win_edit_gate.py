@@ -427,13 +427,33 @@ def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
     return stable, volatile
 
 
-def compose_advisory(fixed: list[str], syntax: list[str], encoding: list[str], batch: list[str], lint: list[str], notes: list[str]) -> str:
+FIX_SHIFT_MSG = "AUTO-FIXED: line numbers shifted - re-read before next patch"
+
+
+def _line_shift(before: bytes | None, after: bytes | None) -> bool:
+    """True when a rewrite moves line numbers (inserts/deletes/uneven spans).
+
+    In-place fixes keep every line number and the model never needs to know;
+    anything that shifts lines gets exactly one minimal note - never the
+    reasons behind it.
+    """
+    if before is None or after is None:
+        return True
+    a = before.decode("utf-8", "replace").splitlines()
+    b = after.decode("utf-8", "replace").splitlines()
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "delete"):
+            return True
+        if tag == "replace" and (i2 - i1) != (j2 - j1):
+            return True
+    return False
+
+
+def compose_advisory(fix_note: str, syntax: list[str], encoding: list[str], batch: list[str], lint: list[str], notes: list[str]) -> str:
     blocks: list[str] = []
-    if fixed:
-        blocks.append(
-            "AUTO-FIXED: " + "; ".join(fixed)
-            + ". File rewritten in place - re-read before next patch."
-        )
+    if fix_note:
+        blocks.append(fix_note)
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
         if not items:
@@ -516,7 +536,8 @@ def main(argv: list[str]) -> int:
     allow_lint = "--lint" in argv
     state = _load_state()
 
-    sections = {"fixed": [], "syntax": [], "encoding": [], "batch": [], "lint": [], "notes": []}
+    sections = {"fix_note": "", "syntax": [], "encoding": [], "batch": [], "lint": [], "notes": []}
+    formatted: list[str] = []
     for path in targets:
         try:
             blob = path.read_bytes()
@@ -537,11 +558,14 @@ def main(argv: list[str]) -> int:
         if note:
             sections["notes"].append(note)
         if not errors and allow_fix and not autofix_disabled_here(path):
-            reformatted, fix_note = format_powershell(path)
+            pre_fix = path.read_bytes()
+            reformatted, fmt_note = format_powershell(path)
             if reformatted:
-                sections["fixed"].append(f"{path.name} formatted")
-            elif fix_note:
-                sections["notes"].append(fix_note)
+                formatted.append(f"{path.name} formatted")
+                if _line_shift(pre_fix, path.read_bytes()):
+                    sections["fix_note"] = FIX_SHIFT_MSG
+            elif fmt_note:
+                sections["notes"].append(fmt_note)
         if allow_lint and not errors and _now() < deadline:
             key = "lint:" + str(path).lower()
             last = state.get(key)
@@ -569,7 +593,8 @@ def main(argv: list[str]) -> int:
             "shell": shell_exe(),
             "fix_allowed": allow_fix,
             "lint_allowed": allow_lint,
-            "counts": {key: len(items) for key, items in sections.items()},
+            "counts": {key: (len(items) if isinstance(items, list) else int(bool(items))) for key, items in sections.items()},
+            "formatted": formatted,
             "skipped": volatile_notes,
             "ms": int((_now() - started) * 1000),
         }

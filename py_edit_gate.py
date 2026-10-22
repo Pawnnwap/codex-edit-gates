@@ -1164,9 +1164,31 @@ def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
     return stable, volatile
 
 
+FIX_SHIFT_MSG = "AUTO-FIXED: line numbers shifted - re-read before next patch"
+
+
+def _line_shift(before: bytes | None, after: bytes | None) -> bool:
+    """True when a rewrite moves line numbers (inserts/deletes/uneven spans).
+
+    In-place fixes (same line count, replacements only) keep every line number
+    and the model never needs to know; anything that shifts lines gets exactly
+    one minimal note - no narration of what changed or why.
+    """
+    if before is None or after is None:
+        return True
+    a = before.decode("utf-8", "replace").splitlines()
+    b = after.decode("utf-8", "replace").splitlines()
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "delete"):
+            return True
+        if tag == "replace" and (i2 - i1) != (j2 - j1):
+            return True
+    return False
+
+
 def compose_advisory(
-    fixed: list[str],
-    imports_added: list[str],
+    fix_note: str,
     syntax: list[str],
     missing_imports: list[str],
     lint: list[str],
@@ -1175,16 +1197,8 @@ def compose_advisory(
 ) -> str:
     """Short, action-ordered text for hookSpecificOutput.additionalContext."""
     blocks: list[str] = []
-    if fixed or imports_added:
-        bits = []
-        if imports_added:
-            bits.append("added " + ", ".join(imports_added))
-        bits.extend(fixed)
-        blocks.append(
-            "AUTO-FIXED: "
-            + "; ".join(bits)
-            + ". File rewritten in place - re-read before next patch.",
-        )
+    if fix_note:
+        blocks.append(fix_note)
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
         if not items:
@@ -1237,12 +1251,19 @@ def check_file(
     if getattr(tools, "shared_error", ""):
         result["notes"].append(str(tools.shared_error))
 
+    pre_fix = _snapshot(path)
     if allow_fix and _now() < deadline:
         result["fixed"] = safe_autofix(tools, path, allow_format)
     if allow_fix and _now() < deadline:
         result["fixed"].extend(hoist_late_imports(tools, path))
     if allow_fix and _now() < deadline:
         result["imports_added"] = auto_imports(tools, path)
+    if result["fixed"] or result["imports_added"]:
+        # In-place fixes stay silent; only a line-number shift is worth one
+        # minimal note, and never the reasons behind it.
+        result["fix_note"] = (
+            FIX_SHIFT_MSG if _line_shift(pre_fix, _snapshot(path)) else ""
+        )
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -1368,6 +1389,7 @@ def main(argv: list[str]) -> int:
         )
     }
     checked: list[str] = []
+    fix_note = ""
     for path in targets:
         checked.append(str(path))
         result = check_file(
@@ -1380,6 +1402,8 @@ def main(argv: list[str]) -> int:
         digest = _sha1(str(path) + json.dumps(result, sort_keys=True, default=str))
         repeated = state.get(digest, 0) > time.time() - DEDUPE_TTL_SECONDS
         state[digest] = time.time()
+        if result.get("fix_note"):
+            fix_note = result["fix_note"]
         if repeated:
             # Same file, same verdict, already reported this session: keep the
             # autofix news, drop the rest so the advisory cannot pile up.
@@ -1393,8 +1417,7 @@ def main(argv: list[str]) -> int:
         notes.append("some checks skipped (time cap)")
     stable_notes, volatile_notes = split_notes(notes)
     advisory = compose_advisory(
-        sections["fixed"],
-        sections["imports_added"],
+        fix_note,
         sections["syntax"],
         sections["missing"],
         sections["lint"],
@@ -1410,6 +1433,8 @@ def main(argv: list[str]) -> int:
             "tier": tools.tier,
             "fix_allowed": allow_fix,
             "advisory_chars": len(advisory),
+            "fixed": sections["fixed"],
+            "imports_added": sections["imports_added"],
             "skipped": volatile_notes,
             "ms": int((_now() - started) * 1000),
         },

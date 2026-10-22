@@ -29,6 +29,8 @@ Env:
   TOOL_DISCOVERY_ROOTS   override the fs-walk roots (os.pathsep separated) -
                          also the test seam for the fallback tier
   TOOL_DISCOVERY_LOG_DIR override the cache directory
+  TOOL_DISCOVERY_FORCE_MISSING  comma-separated tool names to treat as absent
+                         (operator/test seam for the degradation notice)
 
 Windows + Linux/macOS. stdlib only.
 """
@@ -292,6 +294,18 @@ def _candidates_for_hit(name: str, hit: str) -> list[list[str]]:
 
 
 def discover_one(name: str) -> dict:
+    forced = {
+        n.strip()
+        for n in (os.environ.get("TOOL_DISCOVERY_FORCE_MISSING") or "").split(",")
+        if n.strip()
+    }
+    if name in forced:
+        return {
+            "argv": None,
+            "source": "missing",
+            "verified": False,
+            "error": "forced missing via TOOL_DISCOVERY_FORCE_MISSING",
+        }
     tried: list[str] = []
     errors: list[str] = []
     for tier, hits, error in (
@@ -374,11 +388,13 @@ def missing_notice(record: dict) -> str:
 def main(argv: list[str]) -> int:
     if "--session-start" in argv:
         record = warm_cache()
-        if record.get("error"):
-            print(f"[tool-discovery] error: {record['error']}")
         notice = missing_notice(record)
+        if record.get("error"):
+            notice = f"[tool-discovery] error: {record['error']}"
+        # SessionStart hook stdout must be JSON (or empty) - plain text makes
+        # codex report "hook returned invalid session start JSON output".
         if notice:
-            print(notice)
+            print(json.dumps({"systemMessage": notice}, ensure_ascii=False))
         return 0
     if "--find" in argv:
         index = argv.index("--find")
@@ -404,5 +420,13 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except Exception as exc:  # never silent
-        print(f"[tool-discovery] internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        sys.exit(1)
+        print(
+            json.dumps(
+                {
+                    "systemMessage": f"[tool-discovery] internal error: "
+                    f"{type(exc).__name__}: {exc}"
+                },
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(0)

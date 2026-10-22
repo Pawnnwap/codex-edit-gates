@@ -73,7 +73,8 @@ text1 = f1.read_text(encoding="utf-8")
 out_after = run_py(f1)
 check("agent-style hoisted", "import json" in text1.split("def helper")[0], text1[:120])
 check("behavior identical", out_before == out_after and out_before.strip() != "", f"{out_before!r} vs {out_after!r}")
-check("AUTO-FIXED reported", "hoisted 1 late import" in advisory, advisory[:200])
+check("AUTO-FIXED reported (minimal, no reasons)",
+      "line numbers shifted" in advisory and "hoisted" not in advisory, advisory[:200])
 check("no E402 advisory left", "E402" not in advisory, advisory[:200])
 
 # 2. sys.path bootstrap: import must stay below the path fix, no nag

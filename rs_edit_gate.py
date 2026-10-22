@@ -573,30 +573,32 @@ def clippy_fix_guarded(
     )
     if proc is None:
         _restore_snapshot(snapshot, crate)
-        return ([], [], ["clippy --fix timed out; crate restored"])
+        return ([], [], ["clippy --fix timed out; crate restored"], False)
     blob = (proc.stderr or "") + (proc.stdout or "")
     if "Blocking waiting for file lock" in blob:
-        return ([], [], ["clippy --fix skipped (build dir locked by another cargo)"])
+        return ([], [], ["clippy --fix skipped (build dir locked by another cargo)"], False)
     changed, problem = _snapshot_review(snapshot, crate)
     if problem:
         _restore_snapshot(snapshot, crate)
-        return ([], [], [f"clippy --fix reverted ({problem})"])
+        return ([], [], [f"clippy --fix reverted ({problem})"], False)
     if not changed:
-        return ([], [], [])
+        return ([], [], [], False)
     # Re-read with clippy, not plain check: the remaining warnings are what
     # the model still has to act on, and clippy lints never show up in check.
     recheck = cargo_diagnoses(crate, "clippy", max(5.0, deadline - _now()), set())
     if not recheck["ran"] or recheck["errors"]:
         _restore_snapshot(snapshot, crate)
-        return ([], [], ["clippy --fix reverted (post-fix cargo clippy failed)"])
+        return ([], [], ["clippy --fix reverted (post-fix cargo clippy failed)"], False)
     names = ", ".join(f"{p.name} ({lines} lines)" for p, lines in changed[:5])
     notes = []
     if "failed to automatically apply" in blob:
         notes.append("some clippy fixes were not machine-applicable and were left alone")
+    shifted = any(_line_shift(snapshot.get(p), p.read_bytes()) for p, _ in changed)
     return (
         [f"machine-applicable clippy fixes in {names}"],
         recheck["warnings"],
         notes,
+        shifted,
     )
 
 
@@ -619,19 +621,39 @@ def split_notes(notes: list[str]) -> tuple[list[str], list[str]]:
     return stable, volatile
 
 
+FIX_SHIFT_MSG = "AUTO-FIXED: line numbers shifted - re-read before next patch"
+
+
+def _line_shift(before: bytes | None, after: bytes | None) -> bool:
+    """True when a rewrite moves line numbers (inserts/deletes/uneven spans).
+
+    In-place fixes keep every line number and the model never needs to know;
+    anything that shifts lines gets exactly one minimal note - never the
+    reasons behind it.
+    """
+    if before is None or after is None:
+        return True
+    a = before.decode("utf-8", "replace").splitlines()
+    b = after.decode("utf-8", "replace").splitlines()
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "delete"):
+            return True
+        if tag == "replace" and (i2 - i1) != (j2 - j1):
+            return True
+    return False
+
+
 def compose_advisory(
-    fixed: list[str],
+    fix_note: str,
     parse_errors: list[str],
     errors: list[str],
     warnings: list[str],
     notes: list[str],
 ) -> str:
     blocks: list[str] = []
-    if fixed:
-        blocks.append(
-            "AUTO-FIXED: " + "; ".join(fixed)
-            + ". File rewritten in place - re-read before next patch."
-        )
+    if fix_note:
+        blocks.append(fix_note)
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
         if not items:
@@ -686,6 +708,7 @@ def run_edit_mode(payload: dict, argv: list[str], state: dict) -> str:
 
     allow_fix = "--no-autofix" not in argv and "--format" in argv
     sections = {"fixed": [], "parse": [], "errors": [], "warnings": [], "notes": []}
+    fix_shifted = False
     checked_crates: list[dict] = []
 
     by_crate: dict[str, list[Path]] = {}
@@ -712,12 +735,12 @@ def run_edit_mode(payload: dict, argv: list[str], state: dict) -> str:
                 toolchain_notes.add(fmt_note)
             if parse_errors:
                 continue  # a file that cannot parse is not worth formatting
-            if (
-                allow_fix
-                and not autofix_disabled_here(path)
-                and rustfmt_format(path, edition, cwd=crate)
-            ):
-                sections["fixed"].append(f"{path.name} formatted")
+            if allow_fix and not autofix_disabled_here(path):
+                pre_fmt = path.read_bytes()
+                if rustfmt_format(path, edition, cwd=crate):
+                    sections["fixed"].append(f"{path.name} formatted")
+                    if _line_shift(pre_fmt, path.read_bytes()):
+                        fix_shifted = True
         sections["notes"].extend(sorted(toolchain_notes))
 
         crate_record = state.get("crate:" + crate_key)
@@ -763,7 +786,11 @@ def run_edit_mode(payload: dict, argv: list[str], state: dict) -> str:
         }
     )
     return compose_advisory(
-        sections["fixed"], sections["parse"], sections["errors"], sections["warnings"], stable_notes
+        FIX_SHIFT_MSG if fix_shifted else "",
+        sections["parse"],
+        sections["errors"],
+        sections["warnings"],
+        stable_notes,
     )
 
 
@@ -793,6 +820,7 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
     state["clippy:" + crate_key] = {"ts": time.time(), "seconds": result["seconds"]}
     fixed: list[str] = []
     fix_notes: list[str] = []
+    fix_shifted = False
     warnings = result["warnings"]
     if (
         _stop_fix_enabled(argv, crate)
@@ -800,7 +828,7 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
         and result["fixable"]
         and _now() < deadline - 12.0
     ):
-        fixed, warnings, fix_notes = clippy_fix_guarded(crate, deadline)
+        fixed, warnings, fix_notes, fix_shifted = clippy_fix_guarded(crate, deadline)
     notes = ([result["note"]] if result["note"] else []) + fix_notes
     # The per-run duration is timing data, not a finding: it must never reach
     # the advisory or identical edits diverge in the context prefix.
@@ -824,14 +852,15 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
     )
     error_texts = [e["text"] for e in result["errors"]]
     warning_texts = [w["text"] for w in warnings]
-    # A fix run that handled everything has nothing to say: no unfixable
-    # warnings, no errors, no notes - stay silent instead of narrating.
+    fix_note = FIX_SHIFT_MSG if (fixed and fix_shifted) else ""
+    # A fix run that handled everything has nothing to say beyond the line
+    # shift itself - no narration of what was fixed or why.
     if fixed and not error_texts and not warning_texts and not stable_notes:
         audit({"ts": round(time.time(), 2), "mode": "stop", "crate": crate.name,
-               "silent": "fully handled"})
-        return ""
+               "silent": "fully handled", "fixed_detail": fixed})
+        return f"[rs-edit-gate] {fix_note}" if fix_note else ""
     return compose_advisory(
-        fixed,
+        fix_note,
         [],
         error_texts,
         warning_texts,

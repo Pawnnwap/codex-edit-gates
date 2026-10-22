@@ -73,7 +73,8 @@ check("not-is fixed", "os.sep is not None" in t1)
 check("raw string fixed", 'r"\\d+"' in t1)
 check("messy stdout identical", out1_before.splitlines()[0] == out1_after.splitlines()[0] and out1_before.strip() != "", f"{out1_before!r} vs {out1_after!r}")
 check("SyntaxWarning gone", "SyntaxWarning" in out1_before and "SyntaxWarning" not in out1_after)
-check("AUTO-FIXED advisory", "AUTO-FIXED" in advisory, advisory[:140])
+check("AUTO-FIXED advisory (minimal, no reasons)",
+      "line numbers shifted" in advisory and "added" not in advisory, advisory[:140])
 
 # 2. E711 stays advisory-only (pandas __eq__ hazard), file untouched on that line
 f2 = WS / "eqnone.py"

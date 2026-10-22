@@ -9,7 +9,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | File | Checks | Fixes |
 |---|---|---|
 | `py_edit_gate.py` | compile, ruff (F/E/W/B), pyflakes, bandit | safe ruff fixes, curated auto-imports, provably-safe E402 hoist, discovery cached in state |
-| `rs_edit_gate.py` | rustfmt parse (per edit), cargo check (cadence), clippy (Stop) | churn-guarded rustfmt (`--format` opt-in), Stop-time `cargo clippy --fix` under full-src snapshot guards - silent when it fully handles everything |
+| `rs_edit_gate.py` | rustfmt parse (per edit), cargo check (cadence), clippy (Stop) | churn-guarded rustfmt (`--format` opt-in), Stop-time `cargo clippy --fix` under full-src snapshot guards - silent when fully handled and lines hold |
 | `win_edit_gate.py` | PowerShell parser (`Parser::ParseFile`), encoding traps, batch `call`/`!var!` bugs | PSScriptAnalyzer formatter (`--format` opt-in, revert-on-break) |
 | `ml_edit_gate.py` | encoding traps (UTF-16, UTF-8 BOM, GBK-only, invalid bytes), mh_lint parse/structural, `matlab -batch` checkcode (cadence-throttled) | — (advisory-only) |
 | `cpp_edit_gate.py` | encoding traps (UTF-16, MSVC's BOM-less non-ASCII codepage fallback, GBK-only), `clang++ -fsyntax-only` (parse-class errors only) | — (advisory-only) |
@@ -101,6 +101,10 @@ hooks = [
   missing tools and internal errors DO surface as brief stable notes - silent
   degradation and silent exception swallowing are forbidden. Repeated
   identical verdicts are deduplicated (6 h TTL) to keep injected context small.
+- Minimal fix feedback: when the gates fully repair a file, they stay silent if
+  line numbers hold, and say only "AUTO-FIXED: line numbers shifted - re-read
+  before next patch" when they move - never the reasons. Anything not fully
+  handled (unfixable warnings, errors) is reported as usual.
 - Tool detection (`tool_discovery.py`, warmed by the SessionStart hook into
   `~/.codex/logs/tool_discovery.json`): system CLI first (`where`/`which -a`,
   `py -0p`), env-derived install layouts second, a bounded filesystem walk as
