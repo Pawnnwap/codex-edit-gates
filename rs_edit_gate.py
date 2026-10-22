@@ -583,17 +583,19 @@ def clippy_fix_guarded(
         return ([], [], [f"clippy --fix reverted ({problem})"])
     if not changed:
         return ([], [], [])
-    check = cargo_diagnoses(crate, "check", max(5.0, deadline - _now()), set())
-    if not check["ran"] or check["errors"]:
+    # Re-read with clippy, not plain check: the remaining warnings are what
+    # the model still has to act on, and clippy lints never show up in check.
+    recheck = cargo_diagnoses(crate, "clippy", max(5.0, deadline - _now()), set())
+    if not recheck["ran"] or recheck["errors"]:
         _restore_snapshot(snapshot, crate)
-        return ([], [], ["clippy --fix reverted (post-fix cargo check failed)"])
+        return ([], [], ["clippy --fix reverted (post-fix cargo clippy failed)"])
     names = ", ".join(f"{p.name} ({lines} lines)" for p, lines in changed[:5])
     notes = []
     if "failed to automatically apply" in blob:
         notes.append("some clippy fixes were not machine-applicable and were left alone")
     return (
         [f"machine-applicable clippy fixes in {names}"],
-        check["warnings"],
+        recheck["warnings"],
         notes,
     )
 
@@ -820,11 +822,19 @@ def run_stop_mode(payload: dict, argv: list[str], state: dict) -> str:
             "ms": int((_now() - started) * 1000),
         }
     )
+    error_texts = [e["text"] for e in result["errors"]]
+    warning_texts = [w["text"] for w in warnings]
+    # A fix run that handled everything has nothing to say: no unfixable
+    # warnings, no errors, no notes - stay silent instead of narrating.
+    if fixed and not error_texts and not warning_texts and not stable_notes:
+        audit({"ts": round(time.time(), 2), "mode": "stop", "crate": crate.name,
+               "silent": "fully handled"})
+        return ""
     return compose_advisory(
         fixed,
         [],
-        [e["text"] for e in result["errors"]],
-        [w["text"] for w in warnings],
+        error_texts,
+        warning_texts,
         stable_notes,
     )
 

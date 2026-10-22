@@ -70,7 +70,7 @@ advisory = run_stop(crate1)
 after1 = (crate1 / "src" / "lib.rs").read_text(encoding="utf-8")
 check("unused import removed", "use std::io;" not in after1, after1[:90])
 check("bool_comparison fixed", "== true" not in after1, after1[:120])
-check("AUTO-FIXED advisory", "AUTO-FIXED" in advisory and "machine-applicable" in advisory, advisory[:180])
+check("fully-handled fix run stays silent", advisory.strip() == "", advisory[:180])
 check("crate still compiles", sh("cargo", "check", "--offline", cwd=crate1).returncode == 0)
 state1 = json.loads((crate1 / "_gatelogs" / "rs_edit_gate.state.json").read_text())
 check("clippy state recorded", any(k.startswith("clippy:") for k in state1), str(list(state1))[:120])
@@ -110,6 +110,20 @@ after5 = (crate5 / "src" / "lib.rs").read_bytes()
 check("churn: reverted byte-identical", after5 == before5)
 check("churn: revert noted", "reverted" in advisory, advisory[:220])
 check("churn: crate still compiles", sh("cargo", "check", "--offline", cwd=crate5).returncode == 0)
+
+# 6. partial: machine-applicable fix + unfixable warning -> advisory speaks
+crate6 = make_crate(
+    "case6",
+    "use std::io;\n\n"
+    "pub fn many(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) -> u32 {\n"
+    "    let _ = (a, b, c, d, e, f, g);\n"
+    "    h\n}\n",
+)
+advisory = run_stop(crate6)
+after6 = (crate6 / "src" / "lib.rs").read_text(encoding="utf-8")
+check("partial: fixable part fixed", "use std::io;" not in after6, after6[:90])
+check("partial: advisory reports what remains",
+      "AUTO-FIXED" in advisory and "too many arguments" in advisory, advisory[:220])
 
 print()
 print("FAILURES:", failures if failures else "none")

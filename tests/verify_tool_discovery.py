@@ -99,7 +99,12 @@ empty.mkdir(parents=True, exist_ok=True)
 env = base_env(PATH="", VIRTUAL_ENV="", CONDA_PREFIX="",
                TOOL_DISCOVERY_ROOTS=str(empty))
 rc, out = run_disc(["--session-start"], env)
-check("session-start reports missing tools", "not found" in out and "ruff" in out, out[:200])
+record = json.loads(run_disc(["--json"], env)[1])
+missing = sorted(n for n, i in (record.get("tools") or {}).items() if not i.get("argv"))
+expected = ("[tool-discovery] not found: " + ", ".join(missing)
+            + " - related checks and autofix run degraded") if missing else ""
+check("session-start notice matches the actual missing set",
+      out.strip() == expected, f"missing={missing} out={out[:140]!r}")
 rc, out = run_disc(["--find", "definitely-missing-xyz"], env)
 check("missing tool has stable reason", "not found" in (json.loads(out).get("error") or ""), out[:200])
 

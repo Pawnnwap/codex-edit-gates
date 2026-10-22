@@ -9,7 +9,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | File | Checks | Fixes |
 |---|---|---|
 | `py_edit_gate.py` | compile, ruff (F/E/W/B), pyflakes, bandit | safe ruff fixes, curated auto-imports, provably-safe E402 hoist, discovery cached in state |
-| `rs_edit_gate.py` | rustfmt parse (per edit), cargo check (cadence), clippy (Stop) | churn-guarded rustfmt (`--format` opt-in), Stop-time `cargo clippy --fix` under full-src snapshot guards |
+| `rs_edit_gate.py` | rustfmt parse (per edit), cargo check (cadence), clippy (Stop) | churn-guarded rustfmt (`--format` opt-in), Stop-time `cargo clippy --fix` under full-src snapshot guards - silent when it fully handles everything |
 | `win_edit_gate.py` | PowerShell parser (`Parser::ParseFile`), encoding traps, batch `call`/`!var!` bugs | PSScriptAnalyzer formatter (`--format` opt-in, revert-on-break) |
 | `ml_edit_gate.py` | encoding traps (UTF-16, UTF-8 BOM, GBK-only, invalid bytes), mh_lint parse/structural, `matlab -batch` checkcode (cadence-throttled) | — (advisory-only) |
 | `cpp_edit_gate.py` | encoding traps (UTF-16, MSVC's BOM-less non-ASCII codepage fallback, GBK-only), `clang++ -fsyntax-only` (parse-class errors only) | — (advisory-only) |
