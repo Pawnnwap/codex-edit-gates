@@ -4,13 +4,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\write_scan_gate.py")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\scanhome")
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\scanws")
+GATE = Path(__file__).resolve().parent.parent / "write_scan_gate.py"
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "scanhome"
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "scanws"
 
 failures = []
 

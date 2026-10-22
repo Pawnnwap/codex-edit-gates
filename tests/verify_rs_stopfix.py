@@ -4,11 +4,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\rs_edit_gate.py")
-BASE = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\rsfix")
+GATE = Path(__file__).resolve().parent.parent / "rs_edit_gate.py"
+BASE = Path(tempfile.gettempdir()) / "gate_retest" / "rsfix"
 
 failures = []
 

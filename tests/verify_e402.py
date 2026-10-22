@@ -4,12 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\py_edit_gate.py")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\home2")
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\ws2")
+GATE = Path(__file__).resolve().parent.parent / "py_edit_gate.py"
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "home2"
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "ws2"
 
 shutil.rmtree(SANDBOX, ignore_errors=True)
 shutil.rmtree(WS, ignore_errors=True)
@@ -79,7 +80,7 @@ check("no E402 advisory left", "E402" not in advisory, advisory[:200])
 f2 = WS / "bootstrap.py"
 f2.write_text(
     "import sys\n"
-    "sys.path.insert(0, r'E:\\libs')\n"
+    "sys.path.insert(0, 'ext_libs')\n"
     "\n"
     "import json\n"
     "\n"

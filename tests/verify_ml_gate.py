@@ -4,13 +4,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\ml_edit_gate.py")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\mlhome")  # throwaway HOME
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\mlws")
+GATE = Path(__file__).resolve().parent.parent / "ml_edit_gate.py"
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "mlhome"  # throwaway HOME
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "mlws"
 
 shutil.rmtree(SANDBOX, ignore_errors=True)
 shutil.rmtree(WS, ignore_errors=True)

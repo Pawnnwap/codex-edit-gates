@@ -4,13 +4,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 PYEXE = sys.executable
-GATES = Path(r"C:\Users\a\.codex\scripts")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\home")  # throwaway HOME
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\ws")
+GATES = Path(__file__).resolve().parent.parent
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "home"  # throwaway HOME
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "ws"
 
 shutil.rmtree(SANDBOX, ignore_errors=True)
 shutil.rmtree(WS, ignore_errors=True)
@@ -68,11 +69,11 @@ check("warm run much faster", t_warm < t_cold * 0.75, f"cold={t_cold:.2f}s warm=
 check("auto-import still fires", "import json" in ws_py.read_text(encoding="utf-8"))
 
 # stale exe in cache -> falls back to probing
-state["tools"]["argvs"]["ruff"] = [r"E:\gone\python.exe", "-m", "ruff"]
+state["tools"]["argvs"]["ruff"] = [str(SANDBOX / "gone" / "python.exe"), "-m", "ruff"]
 (SANDBOX / ".codex" / "logs" / "py_edit_gate.state.json").write_text(json.dumps(state))
 rc, out = run_gate("py_edit_gate.py", patch_payload("clean.py"))
 state2 = json.loads((SANDBOX / ".codex" / "logs" / "py_edit_gate.state.json").read_text())
-check("stale exe re-probed", state2["tools"]["argvs"]["ruff"][0] != r"E:\gone\python.exe")
+check("stale exe re-probed", state2["tools"]["argvs"]["ruff"][0] != str(SANDBOX / "gone" / "python.exe"))
 
 # ── py gate: encoding guard ─────────────────────────────────────────────────
 gbk = WS / "gbk_comment.py"

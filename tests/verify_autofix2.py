@@ -4,12 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\py_edit_gate.py")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\home3")
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\ws3")
+GATE = Path(__file__).resolve().parent.parent / "py_edit_gate.py"
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "home3"
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "ws3"
 
 shutil.rmtree(SANDBOX, ignore_errors=True)
 shutil.rmtree(WS, ignore_errors=True)

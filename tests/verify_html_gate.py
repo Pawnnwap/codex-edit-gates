@@ -4,12 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PYEXE = sys.executable
-GATE = Path(r"C:\Users\a\.codex\scripts\html_edit_gate.py")
-SANDBOX = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\htmlhome")
-WS = Path(r"C:\Users\a\AppData\Local\Temp\gate_retest\htmlws")
+GATE = Path(__file__).resolve().parent.parent / "html_edit_gate.py"
+SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "htmlhome"
+WS = Path(tempfile.gettempdir()) / "gate_retest" / "htmlws"
 
 failures = []
 
