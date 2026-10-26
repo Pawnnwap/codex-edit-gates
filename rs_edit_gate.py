@@ -8,10 +8,11 @@ ignores payloads with no .rs files in them.
 
 Economics are the inverse of Python's: the Rust compiler is the cheap,
 authoritative check, and rustfmt is the expensive/noisy one. Measured on this
-machine: warm `cargo check` = 0.1s (tiny) / 2.5s (rust_ext) / 4.9s (orderpipe) /
-11s (snapshotpipe); `cargo clippy` warm ~2-3s; rustfmt ~90ms per file; and 29 of
-51 orderpipe files are not rustfmt-clean, so auto-formatting on every edit would
-rewrite most files the agent touches. Hence:
+machine from the gate's own audit log: warm `cargo check` spans 0.1s (tiny) to
+18.5s (snapshotpipe) / 16.4s (orderpipe); `cargo clippy` spans 0.5s to 26.2s
+(snapshotpipe) and past 45s (orderpipe, HF). The spread is not crate size:
+rust-analyzer's `cargo check/clippy --lib --all-targets` and any `cargo build`
+share the crate's target dir, so a gate run pays lock-wait plus build. Hence:
 
   tier A  rustfmt PARSE check, every edit (~90ms). rustfmt doubles as a parser:
           a syntax error prints "error: ..." and exits 1.
@@ -47,13 +48,16 @@ import sys
 import time
 from pathlib import Path
 
-HARD_CAP_SECONDS = 20.0
+HARD_CAP_SECONDS = 35.0
 RUSTFMT_TIMEOUT = 8.0
-CHECK_BUDGET = 18.0
-CLIPPY_BUDGET = 45.0
-# The Stop hook allows 60s; leave margin so the hook is never killed mid-fix
-# with an unverified crate on disk.
-STOP_HARD_CAP_SECONDS = 50.0
+CHECK_BUDGET = 28.0
+CLIPPY_BUDGET = 90.0
+# The Stop hook allows 120s (see [[hooks.Stop]] in ~/.codex/config.toml); leave
+# margin so the hook is never killed mid-fix with an unverified crate on disk.
+# Sized to the measured worst case above: the caps must outlast a run that
+# queues behind rust-analyzer's build lock, which is what made the old
+# 18s/45s caps fire on every second crate.
+STOP_HARD_CAP_SECONDS = 110.0
 STOP_CLIPPY_INTERVAL = 90.0
 
 # Cadence for cargo check, driven by each crate's own measured warm duration.
@@ -156,6 +160,50 @@ def _run(cmd: list, timeout: float, cwd: Path | None = None):
         )
     except Exception:
         return None
+
+
+def _run_cargo(cmd: list, timeout: float, cwd: Path | None = None):
+    """Run cargo, keeping its partial output when the budget expires.
+
+    subprocess.run() kills cargo and discards the captured pipes, so a cargo
+    parked on the build-directory lock looks exactly like a cargo that is only
+    slow. Python attaches partial output to TimeoutExpired for
+    capture_output=True, which is what lets the caller tell the two apart.
+    Returns (CompletedProcess | None, partial output text).
+    """
+    try:
+        proc = subprocess.run(
+            [str(c) for c in cmd],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            cwd=str(cwd) if cwd else None,
+        )
+        return proc, ""
+    except subprocess.TimeoutExpired as expired:
+        parts = []
+        for chunk in (expired.stderr, expired.stdout):
+            if isinstance(chunk, bytes):
+                chunk = chunk.decode("utf-8", "replace")
+            if chunk:
+                parts.append(str(chunk))
+        return None, "\n".join(parts)
+    except Exception:
+        return None, ""
+
+
+_LOCK_WAIT_RE = re.compile(r"[Bb]locking waiting for file lock on ([^\n]+)")
+
+
+def _lock_wait_target(text: str) -> str:
+    """'build directory' from cargo's lock banner, '' when there is none."""
+    match = _LOCK_WAIT_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(1).strip().strip('"').rstrip(". ")
 
 
 def _strip_verbatim(path_text: str) -> str:
@@ -386,7 +434,7 @@ def cargo_diagnoses(
         out["note"] = "cargo not found on PATH"
         return out
     started = _now()
-    proc = _run(
+    proc, partial = _run_cargo(
         [
             "cargo",
             kind,
@@ -399,14 +447,23 @@ def cargo_diagnoses(
         cwd=crate,
     )
     out["seconds"] = round(_now() - started, 2)
+    blob = partial if proc is None else (proc.stderr or "") + (proc.stdout or "")
+    locked = _lock_wait_target(blob)
+    if locked:
+        out["note"] = (
+            f"cargo {kind} skipped: it spent the whole {int(budget)}s budget"
+            f" waiting for the lock on {locked} - a parallel cargo build or the"
+            " IDE checker is sharing this target dir (the crate is not cold)"
+        )
+        return out
     if proc is None:
-        out["note"] = f"cargo {kind} timed out after {int(budget)}s (cold crate?)"
+        out["note"] = (
+            f"cargo {kind} did not finish within the {int(budget)}s budget and"
+            " never reported a lock wait - the build itself is slower than the"
+            " budget on a warm target dir (not a cold crate)"
+        )
         return out
     out["ran"] = True
-    blob = (proc.stderr or "") + (proc.stdout or "")
-    if "Blocking waiting for file lock" in blob:
-        out["note"] = f"cargo {kind} skipped (build dir locked by another cargo)"
-        return out
 
     for line in (proc.stdout or "").splitlines():
         line = line.strip()

@@ -117,7 +117,33 @@ import rs_edit_gate  # noqa: E402
 
 src = (GATES / "rs_edit_gate.py").read_text(encoding="utf-8")
 check("stop budget uses CLIPPY_BUDGET", "min(CLIPPY_BUDGET" in src and "CLIPPY_BUDGET, set())" not in src)
-check("stop budget under hook timeout", rs_edit_gate.CLIPPY_BUDGET < 60)
+
+# The budgets must stay under the hook timeouts registered in
+# ~/.codex/config.toml, and nested inside each other:
+# clippy budget < stop cap < stop hook timeout,
+# check budget < edit cap < edit hook timeout.
+STOP_HOOK_TIMEOUT = 120
+EDIT_HOOK_TIMEOUT = 45
+check(
+    "stop cap under the stop hook timeout",
+    rs_edit_gate.STOP_HARD_CAP_SECONDS < STOP_HOOK_TIMEOUT,
+)
+check(
+    "clippy budget under the stop cap",
+    rs_edit_gate.CLIPPY_BUDGET < rs_edit_gate.STOP_HARD_CAP_SECONDS,
+)
+check(
+    "edit cap under the edit hook timeout",
+    rs_edit_gate.HARD_CAP_SECONDS < EDIT_HOOK_TIMEOUT,
+)
+check(
+    "check budget under the edit cap",
+    rs_edit_gate.CHECK_BUDGET < rs_edit_gate.HARD_CAP_SECONDS,
+)
+check(
+    "timeout notes never guess at a cold crate",
+    "cold crate?" not in src and "Blocking waiting for file lock" in src,
+)
 
 print()
 print("FAILURES:", failures if failures else "none")

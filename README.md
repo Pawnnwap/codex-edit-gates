@@ -65,8 +65,8 @@ hooks = [
 | Event | Command | Timeout |
 |---|---|---|
 | PostToolUse | `py_edit_gate.py` | 25 |
-| PostToolUse | `rs_edit_gate.py` | 25 |
-| Stop | `rs_edit_gate.py --stop` | 60 |
+| PostToolUse | `rs_edit_gate.py` | 45 |
+| Stop | `rs_edit_gate.py --stop` | 120 |
 | PostToolUse | `win_edit_gate.py` | 25 |
 | PostToolUse | `ml_edit_gate.py` | 25 |
 | PostToolUse | `cpp_edit_gate.py` | 25 |
