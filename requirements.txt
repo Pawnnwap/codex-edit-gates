@@ -1,0 +1,36 @@
+# codex-edit-gates -- Python requirements
+#
+# The gates are stdlib-only by design: none of the *_edit_gate.py scripts,
+# write_scan_gate.py, or tool_discovery.py imports a third-party package, so
+# nothing here is required to RUN them. Tested on Python 3.13; 3.9+ is enough
+# (no syntax newer than that is used).
+#
+# This file lists the OPTIONAL external checkers that py_edit_gate.py probes for
+# on PATH at session start (result cached ~1 h, see tool_discovery.py). With a
+# checker missing the gate drops to a lighter tier and keeps working -- it never
+# errors -- so installing them only widens coverage:
+#   ruff      tier-1 autofix (safe F/E/W/B fixes + ruff format) and tier-3 check
+#   pyflakes  tier-3 cross-check for undefined names / unused imports
+#   bandit    tier-3 security findings
+#
+# Install (only needed on machines whose PATH lacks these CLIs):
+#   pip install -r requirements.txt
+
+ruff>=0.17
+pyflakes>=4.0
+bandit>=1.9
+
+# External tools that are NOT pip-installable (documented, deliberately not
+# pinned above). Each gate finds them on PATH at session start and degrades to
+# its lighter tier when one is missing:
+#   cpp  clang++ from LLVM (tier 2: `clang++ -fsyntax-only`). Windows: install
+#        LLVM (winget install LLVM.LLVM); the gate checks PATH, then
+#        <ProgramFiles>/<ProgramFiles(x86)>/<LOCALAPPDATA>/LLVM/bin/clang++.exe
+#        (cpp_edit_gate.py:380). It also needs a real MSVC + Windows SDK on the
+#        machine: clang targets x86_64-pc-windows-msvc and resolves <vector>
+#        etc. only through it, so without VS Build Tools every system include
+#        is "file not found", the gate emits one header note and skips syntax.
+#        Not listed as a pin because PyPI "clang" is libclang bindings, not the
+#        compiler driver.
+#   rs   rustfmt + cargo (rustup) | win: PSScriptAnalyzer (Install-Module)
+#   js   node | ml: mh_lint + MATLAB          -- see README, step 4.
