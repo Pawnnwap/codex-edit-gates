@@ -16,9 +16,12 @@ the agent just touched, then:
                             (replacement count within the churn cap), proven
                             idempotent by a re-measure; a larger drift is a
                             reformat and is held back instead
-                        Everything else stays report-only. The advisory says
-                        what was fixed in the same tone as the ruff-based
-                        py_edit_gate ("AUTO-FIXED: ...").
+                        Everything else stays report-only. Advisory policy
+                        mirrors py_edit_gate: in-place fixes (no line-number
+                        shift) are totally silent, and a shift gets exactly
+                        one minimal note (AUTO-FIXED: line numbers shifted) -
+                        never a narration of what changed; the audit log
+                        carries the details.
   tier 2  encoding      byte-level classification after any fix: UTF-16 (no
                         compiler reads it), non-ASCII in BOM-less text (MSVC
                         falls back to the ANSI codepage and garbles string
@@ -63,6 +66,7 @@ Audit log: ~/.codex/logs/cpp_edit_gate.jsonl
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -83,6 +87,8 @@ MAX_ITEMS_PER_SECTION = 8
 DEDUPE_TTL_SECONDS = 6 * 3600
 DISCOVERY_TTL_SECONDS = 3600
 CHECK_ONLY = "--check-only" in sys.argv
+# py_edit_gate's one-liner for shifting fixes; in-place fixes stay silent.
+FIX_SHIFT_MSG = "AUTO-FIXED: line numbers shifted - re-read before next patch"
 
 C_SUFFIXES = {".c"}
 CPP_SUFFIXES = {".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
@@ -530,6 +536,45 @@ def err_worse(before: list[str], after: list[str]) -> bool:
     return any(err not in before_keys for err in after)
 
 
+def _canon_lines(blob: bytes) -> list[str]:
+    """Text lines of a blob in whatever encoding it actually is.
+
+    The shift decision is about line structure, not byte encoding: a UTF-16 ->
+    UTF-8+BOM conversion or a BOM prepend must never look like a shift.
+    """
+    if blob[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            blob = blob.decode("utf-16", "strict").encode("utf-8", "replace")
+        except Exception:
+            pass
+    try:
+        text = blob.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        text = blob.decode("gbk", "replace")
+    return text.replace("\ufeff", "").splitlines()
+
+
+def line_shift(before: bytes | None, after: bytes | None) -> bool:
+    """True when a rewrite moves line numbers (inserts/deletes/uneven spans).
+
+    In-place fixes (same line count, replacements only) keep every line number
+    and the model never needs to know; anything that shifts lines gets exactly
+    one minimal note - no narration of what changed or why. Mirrors
+    py_edit_gate._line_shift but on encoding-canonicalized lines.
+    """
+    if before is None or after is None:
+        return True
+    a = _canon_lines(before)
+    b = _canon_lines(after)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "delete"):
+            return True
+        if tag == "replace" and (i2 - i1) != (j2 - j1):
+            return True
+    return False
+
+
 # ── Tier 2b: clang-format (popular formatter, churn-capped) ─────────────────
 FORMAT_CHURN_CAP = 40  # replacement cells; beyond this it is a reformat, not a fix
 _REPLACEMENT_RE = re.compile(r"<replacement ")
@@ -784,7 +829,7 @@ def clang_findings(
 
 # ── Advisory ────────────────────────────────────────────────────────────────
 def compose_advisory(
-    fixed: list[str],
+    fix_note: str,
     syntax: list[str],
     encoding: list[str],
     tidy: list[str],
@@ -792,6 +837,8 @@ def compose_advisory(
 ) -> str:
     """Short, action-ordered text for hookSpecificOutput.additionalContext."""
     blocks: list[str] = []
+    if fix_note:
+        blocks.append(fix_note)
 
     def add(label: str, items: list[str], limit: int = MAX_ITEMS_PER_SECTION) -> None:
         if not items:
@@ -800,7 +847,6 @@ def compose_advisory(
         tail = f" (+{len(items) - len(shown)} more)" if len(items) > len(shown) else ""
         blocks.append(f"{label}: " + " | ".join(shown) + tail)
 
-    add("AUTO-FIXED", fixed, 4)
     add("DOES NOT PARSE", syntax, 4)
     add("encoding", encoding)
     add("tidy", tidy)
@@ -810,8 +856,6 @@ def compose_advisory(
     # Gate tag on the first line only - one advisory per tool call, a tag per
     # block is pure repetition in the model's context.
     text = "\n".join([f"[cpp-edit-gate] {blocks[0]}"] + blocks[1:])
-    if fixed:
-        text += "\nFile changed on disk - re-read before the next patch to it."
     return (
         text
         if len(text) <= ADVISORY_MAX_CHARS
@@ -842,12 +886,14 @@ def check_file(
     deadline: float,
     note_sink: list[str],
 ) -> dict:
-    result = {"syntax": [], "encoding": [], "notes": [], "fixed": [], "tidy": []}
+    result = {"syntax": [], "encoding": [], "notes": [], "fixed": [], "tidy": [],
+              "fix_note": ""}
     try:
         blob = path.read_bytes()
     except OSError as exc:
         result["notes"].append(f"{path.name}: unreadable ({exc})")
         return result
+    pre_fix = blob
 
     may_write = not CHECK_ONLY and not syntax_disabled_here(path)
     if may_write:
@@ -902,6 +948,8 @@ def check_file(
             result["tidy"].extend(tidy_findings(tools, path, deadline))
     else:
         note_sink.append(f"{path.name}: syntax check skipped (time cap)")
+
+    result["fix_note"] = FIX_SHIFT_MSG if line_shift(pre_fix, path.read_bytes()) else ""
     return result
 
 
@@ -958,6 +1006,7 @@ def main(argv: list[str]) -> int:
     sections = {k: [] for k in ("syntax", "encoding", "notes", "fixed", "tidy")}
     checked: list[str] = []
     note_sink: list[str] = []  # env/time-dependent: audit only, never advisory
+    shifted = False
     for path in targets:
         checked.append(str(path))
         result = check_file(path, tools, deadline, note_sink)
@@ -965,13 +1014,15 @@ def main(argv: list[str]) -> int:
         repeated = state.get(digest, 0) > time.time() - DEDUPE_TTL_SECONDS
         state[digest] = time.time()
         if repeated:
-            for key in ("syntax", "encoding", "notes"):
-                result[key] = []
+            for key in ("syntax", "encoding", "notes", "fixed", "tidy", "fix_note"):
+                result[key] = [] if isinstance(result[key], list) else ""
         for key, bucket in sections.items():
             bucket.extend(result[key])
+        if result.get("fix_note"):
+            shifted = True
 
     advisory = compose_advisory(
-        sections["fixed"],
+        FIX_SHIFT_MSG if shifted else "",
         sections["syntax"],
         sections["encoding"],
         sections["tidy"],
@@ -986,6 +1037,7 @@ def main(argv: list[str]) -> int:
             "tier": tools.tier,
             "fixed": sections["fixed"],
             "tidy_count": len(sections["tidy"]),
+            "line_shift": shifted,
             "check_only": CHECK_ONLY,
             "advisory_chars": len(advisory),
             "skipped": note_sink,
