@@ -17,6 +17,7 @@ exit 0 with no output, so a broken gate can never break a session.
 | `html_edit_gate.py` | charset declaration vs bytes mismatches, no-charset non-ASCII, tag-stack structure (stray/mismatched/unclosed/dup attrs), strict XML for .xhtml | — (advisory-only, pure stdlib, ~1 ms) |
 | `write_scan_gate.py` | shell-write blind spot: snapshot-diffs the workspace on `exec_command`, delegates script-written files to their language gate | — (advisory-only) |
 | `tool_discovery.py` | session-start environment scan (CLI `where`/`which`/`py -0p`, env layouts, fs-walk fallback), shared tool cache | — (detection only) |
+| `continue_gate.py` | turn-ending blind spot (Stop): the turn tail in the rollout transcript must end on an assistant text message, not on a thought / tool call / tool result | types "continue" so the agent resumes the work |
 
 Findings are reported as short advisories via
 `hookSpecificOutput.additionalContext` (PostToolUse) or `systemMessage` (Stop).
@@ -49,7 +50,7 @@ name, and hook timeouts kill the whole process tree.
    record appears in `~/.codex/logs/<gate>.jsonl`, then run the `tests/`
    suites below for the full synthetic matrix.
 
-The registration set is ten blocks. Every PostToolUse block except the
+The registration set is eleven blocks. Every PostToolUse block except the
 write-scan one uses the matcher
 `apply_patch|Edit|Write|MultiEdit|edit_file|write_file`; one block as a
 template (the rest differ only in the command):
@@ -74,6 +75,30 @@ hooks = [
 | PostToolUse | `html_edit_gate.py` | 25 |
 | PostToolUse | `write_scan_gate.py` (matcher `exec_command`) | 60 |
 | SessionStart | `tool_discovery.py --session-start` | 60 |
+| Stop | `continue_gate.py` | 20 |
+
+### Keep-going gate (`continue_gate.py`)
+
+A turn can end mid-work: the last thing the model emitted is reasoning, a tool call,
+or a tool result, so it quits silently with the task half done. The Stop payload only
+carries `last_assistant_message` (the last text ever emitted, so a mid-turn note masks
+the problem), so the gate reads the turn tail from `transcript_path` (with a
+`session_id` glob under `~/.codex/sessions` as fallback) and classifies the last item
+after the last `task_started` and the last user message.
+
+- Silent tail: `reasoning`, a tool call (`function_call` / `custom_tool_call`) with
+  nothing after it, a `function_call_output`, a blank assistant message, or an
+  assistant message whose `phase` is `comment`.
+- Action: exactly {"decision": "block", "reason": "continue"}. The model receives the
+  single word continue - the same input it gets when the user types it. Nothing else is
+  sent: every allow path (healthy turn, cap reached, no progress, --warn-only) prints no
+  output at all and only writes an audit record.
+- Verified live through the CLI: Codex prints `Stop Blocked`, hands the agent the word
+  continue, the agent resumes and answers again, and the following Stop completes.
+- Calibrated on this machine's transcripts: of the 40 most recent, 38 stayed silent,
+  1 was a live mid-turn session, 1 fired on a run that died mid-turn on a
+  `write_stdin` call.
+
 
 ## Operational notes
 
@@ -82,10 +107,12 @@ hooks = [
   command + timeout), not the script bytes: editing these scripts does NOT
   require re-trust, but touching a `[[hooks]]` block silently disables that
   hook until it is re-trusted in an interactive session.
-- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js,html,write_scan}_edit_gate.jsonl` (+ `.state.json`).
+- Audit logs: `~/.codex/logs/{py,rs,win,ml,cpp,js,html,write_scan}_edit_gate.jsonl` (+ `.state.json`), `continue_gate.jsonl` (+ `.state.json`).
+
 - Kill switches:
   - env: `PY_EDIT_GATE=0`, `RS_EDIT_GATE=0`, `WIN_EDIT_GATE=0`, `ML_EDIT_GATE=0`,
     `CPP_EDIT_GATE=0`, `JS_EDIT_GATE=0`, `HTML_EDIT_GATE=0`, `WRITE_SCAN_GATE=0`
+  - keep-going gate: `CONTINUE_GATE=0` (kill), `--warn-only` (note only), `--max-per-turn=0` (never blocks)
   - stop-fix only: `RS_EDIT_GATE_AUTOFIX=0`
   - ml authoritative tier only: `ML_EDIT_GATE_CHECKCODE=0` (no matlab spawn)
   - per project: a `.edit-gate-disable` marker file (advisories only; it also
@@ -136,6 +163,7 @@ python tests/verify_js_gate.py     # js: encoding, node --check, TS strip probe,
 python tests/verify_html_gate.py   # html: charset mismatches, tag-stack anti-false-positive battery, determinism
 python tests/verify_write_scan.py  # scan: snapshot diff, script-write detection, delegation, --force
 python tests/verify_tool_discovery.py  # discovery: CLI-first, walk fallback, visible errors, startup cache, cache-hit safety
+python tests/verify_continue_gate.py       # stop gate: silent-tail verdicts, continue caps, no-progress guard, skips, kill switches
 ```
 
 They target the installed copies under `~/.codex/scripts`; adjust `GATE` in
