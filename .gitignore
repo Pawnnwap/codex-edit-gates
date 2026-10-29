@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 *.log
 .state/
+tool_roots.local.json

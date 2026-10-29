@@ -260,7 +260,7 @@ _E402_BOOTSTRAP_RE = re.compile(
 )
 
 
-# ── Logging / state ──────────────────────────────────────────────────────────
+# 鈹€鈹€ Logging / state 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _log_dir() -> Path:
     return Path.home() / ".codex" / "logs"
 
@@ -363,7 +363,7 @@ def autofix_disabled_here(path: Path) -> bool:
     return False
 
 
-# ── Payload parsing ─────────────────────────────────────────────────────────
+# 鈹€鈹€ Payload parsing 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def parse_patch_paths(text: str) -> list[str]:
     """Paths from an apply_patch body ('*** Update File: <path>')."""
     return [m.group(1) for m in _PATCH_FILE_RE.finditer(text) if m.group(1).strip()]
@@ -433,7 +433,7 @@ def skip_reason(path: Path) -> str:
     return ""
 
 
-# ── Tool discovery ──────────────────────────────────────────────────────────
+# 鈹€鈹€ Tool discovery 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def interpreter_candidates() -> list[str]:
     """Python interpreters to probe for -m tools: the running one, PATH, and
     any active venv/conda env - all derived from the system, never hardcoded."""
@@ -450,6 +450,11 @@ def interpreter_candidates() -> list[str]:
             candidate = Path(base) / rel
             if candidate.is_file() and str(candidate) not in out:
                 out.append(str(candidate))
+    for base in extra_env_bases():
+        for rel in ("Scripts/python.exe", "bin/python", "bin/python3"):
+            candidate = Path(base) / rel
+            if candidate.is_file() and str(candidate) not in out:
+                out.append(str(candidate))
     return out
 
 
@@ -460,6 +465,39 @@ def interpreter_candidates() -> list[str]:
 # deadline bounds the worst case. Runs only on cold discovery; the result is
 # cached in state for an hour.
 _TOOL_FILENAMES = ("ruff", "pyflakes", "bandit")
+# Machine-local env roots outside PATH and the walk's reach (ProgramData is
+# pruned; project venvs sit deeper than the depth limit). Supplied out of band
+# so no personal path is committed: TOOL_DISCOVERY_ENV_BASES (pathsep-separated)
+# or a gitignored tool_roots.local.json beside this file.
+_EXTRA_BASES_CACHE: list[str] | None = None
+
+
+def extra_env_bases() -> list[str]:
+    global _EXTRA_BASES_CACHE
+    if _EXTRA_BASES_CACHE is not None:
+        return _EXTRA_BASES_CACHE
+    found: list[str] = []
+    raw = os.environ.get("TOOL_DISCOVERY_ENV_BASES", "").strip()
+    if raw:
+        found.extend(p for p in raw.split(os.pathsep) if p)
+    try:
+        data = json.loads(
+            (Path(__file__).with_name("tool_roots.local.json")).read_text(encoding="utf-8")
+        )
+        if isinstance(data, dict) and isinstance(data.get("env_bases"), list):
+            found.extend(str(p) for p in data["env_bases"] if p)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    out: list[str] = []
+    for base in found:
+        if base and base not in out and Path(base).is_dir():
+            out.append(base)
+    _EXTRA_BASES_CACHE = out
+    return out
+
+
 _FS_TOOL_DIRS_CACHE: list[str] | None = None
 _FS_PRUNE = {
     "windows", "winsxs", "$recycle.bin", "system volume information",
@@ -615,6 +653,22 @@ class Tools:
             proc = _run([*argv, "--version"], TOOL_TIMEOUT)
             if proc and proc.returncode == 0:
                 setattr(self, slot, argv)
+        # Known local env roots: their tool dirs are outside PATH and outside
+        # the walk's reach, so probe them directly before the drive sweep.
+        for name in slots:
+            if getattr(self, name) is not None:
+                continue
+            for base in extra_env_bases():
+                for rel in (f"Scripts/{name}.exe", f"bin/{name}", f"Scripts/{name}"):
+                    candidate = Path(base) / rel
+                    if not candidate.is_file():
+                        continue
+                    proc = _run([str(candidate), "--version"], TOOL_TIMEOUT)
+                    if proc and proc.returncode == 0:
+                        setattr(self, name, [str(candidate)])
+                        break
+                if getattr(self, name) is not None:
+                    break
         # Filesystem fallback: tool executables in any standard tool dir on the
         # system (a venv's Scripts, a user's bin), plus their sibling or parent
         # interpreter as a -m runner. No location is assumed.
@@ -676,7 +730,7 @@ def _ruff(tools: Tools, args: list, target: Path, timeout: float = TOOL_TIMEOUT)
     )
 
 
-# ── Checks ──────────────────────────────────────────────────────────────────
+# 鈹€鈹€ Checks 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def compile_problem(text: str, path: Path) -> str:
     """'' when the source compiles, else a 'name:line:col msg' line."""
     try:
@@ -767,7 +821,7 @@ def bandit_lines(tools: Tools, path: Path) -> list[str]:
     return lines
 
 
-# ── Mutating tiers (each is rolled back unless it provably improved things) ──
+# 鈹€鈹€ Mutating tiers (each is rolled back unless it provably improved things) 鈹€鈹€
 def _snapshot(path: Path):
     try:
         return path.read_bytes()
@@ -1146,7 +1200,7 @@ def auto_imports(tools: Tools, path: Path) -> list[str]:
     return [s for s in statements if s.split()[-1] in resolved]
 
 
-# ── Advisory composition ────────────────────────────────────────────────────
+# 鈹€鈹€ Advisory composition 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Notes that always differ across retries (budget/duration text) would make
 # the injected context prefix diverge (prefill cache misses), so they are split
 # off at the compose boundary and land in the audit log. Everything else -
@@ -1224,7 +1278,7 @@ def compose_advisory(
     )
 
 
-# ── Per-file pipeline ───────────────────────────────────────────────────────
+# 鈹€鈹€ Per-file pipeline 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def check_file(
     path: Path,
     tools: Tools,

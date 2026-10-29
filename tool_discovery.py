@@ -62,6 +62,39 @@ _FS_PRUNE = {
 }
 _FS_ENV_NAMES = {"venv", ".venv", "env", "virtualenv", "envs"}
 
+# Machine-local env roots that PATH and the walk cannot see (ProgramData is
+# pruned; project venvs sit past the depth limit). They are supplied out of
+# band so no personal path is committed: TOOL_DISCOVERY_ENV_BASES
+# (pathsep-separated) or a gitignored tool_roots.local.json beside this file
+# holding {"env_bases": ["<dir>", ...]}.
+_EXTRA_BASES_CACHE: list[str] | None = None
+
+
+def extra_env_bases() -> list[str]:
+    global _EXTRA_BASES_CACHE
+    if _EXTRA_BASES_CACHE is not None:
+        return _EXTRA_BASES_CACHE
+    found: list[str] = []
+    raw = os.environ.get("TOOL_DISCOVERY_ENV_BASES", "").strip()
+    if raw:
+        found.extend(p for p in raw.split(os.pathsep) if p)
+    try:
+        data = json.loads(
+            (Path(__file__).with_name("tool_roots.local.json")).read_text(encoding="utf-8")
+        )
+        if isinstance(data, dict) and isinstance(data.get("env_bases"), list):
+            found.extend(str(p) for p in data["env_bases"] if p)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    out: list[str] = []
+    for base in found:
+        if base and base not in out and Path(base).is_dir():
+            out.append(base)
+    _EXTRA_BASES_CACHE = out
+    return out
+
 # Vendor layouts beneath environment-derived bases (relative, never absolute).
 _WIN_LAYOUTS = {
     "clang++": ("LLVM/bin/clang++.exe",),
@@ -161,6 +194,11 @@ def interpreter_candidates() -> tuple[list[str], str | None]:
             candidate = Path(base) / rel
             if candidate.is_file() and str(candidate) not in out:
                 out.append(str(candidate))
+    for base in extra_env_bases():
+        for rel in ("Scripts/python.exe", "bin/python", "bin/python3"):
+            candidate = Path(base) / rel
+            if candidate.is_file() and str(candidate) not in out:
+                out.append(str(candidate))
     return out, ("; ".join(errors) if errors else None)
 
 
@@ -192,6 +230,17 @@ def env_layout_hits(name: str) -> list[str]:
             for candidate in sorted(glob.glob(str(base / rel))):
                 if Path(candidate).is_file() and str(candidate) not in out:
                     out.append(str(candidate))
+    return out
+
+
+# ── tier 2b: known local env roots ─────────────────────────────────────────
+def extra_env_hits(name: str) -> list[str]:
+    out: list[str] = []
+    for base in extra_env_bases():
+        for rel in (f"Scripts/{name}.exe", f"bin/{name}", f"Scripts/{name}"):
+            candidate = Path(base) / rel
+            if candidate.is_file() and str(candidate) not in out:
+                out.append(str(candidate))
     return out
 
 
@@ -318,6 +367,7 @@ def discover_one(name: str) -> dict:
     for tier, hits, error in (
         ("cli", *cli_hits(name)),
         ("env", env_layout_hits(name), None),
+        ("extra", extra_env_hits(name), None),
         ("walk", fs_walk_hits(name), None),
     ):
         if error:
