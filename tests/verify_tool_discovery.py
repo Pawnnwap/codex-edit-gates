@@ -18,7 +18,7 @@ from pathlib import Path
 
 PYEXE = sys.executable
 ROOT = Path(__file__).resolve().parent.parent
-DISC = ROOT / "tool_discovery.py"
+DISC_SRC = ROOT / "tool_discovery.py"
 GATE = ROOT / "py_edit_gate.py"
 SANDBOX = Path(tempfile.gettempdir()) / "gate_retest" / "dischome"
 WS = Path(tempfile.gettempdir()) / "gate_retest" / "discws"
@@ -42,7 +42,9 @@ def run_disc(args, env):
 def base_env(**extra):
     env = dict(os.environ)
     env.update(USERPROFILE=str(SANDBOX), HOME=str(SANDBOX),
-               TOOL_DISCOVERY_LOG_DIR=str(SANDBOX / ".codex" / "logs"))
+               TOOL_DISCOVERY_LOG_DIR=str(SANDBOX / ".codex" / "logs"),
+               # Hermetic: the ambient env must not supply extra roots.
+               TOOL_DISCOVERY_ENV_BASES="")
     env.update(extra)
     return env
 
@@ -67,6 +69,11 @@ def make_fake_tool(name: str) -> Path:
 
 shutil.rmtree(FAKE, ignore_errors=True)
 FAKE.mkdir(parents=True)
+# Run a COPY of the script: a machine-local tool_roots.local.json beside the
+# live one injects real env bases and shadows the sandbox walk (source=extra).
+# The copy has no sibling config, so the walk tier is what the test exercises.
+DISC = FAKE / DISC_SRC.name
+shutil.copy(DISC_SRC, DISC)
 
 # ── 0a. CLI tier first: a PATH tool is found via where/which, not the walk ──
 fake_cli = make_fake_tool("ruff")
