@@ -101,6 +101,11 @@ IGNORE_DIR_NAMES = {
     ".vscode",
 }
 
+# The only Python under ~/.codex is this hook suite. A broken gate silently
+# disables edit safety, so its sources ARE linted even though the parent name
+# is reserved for session data.
+HOOK_SCRIPTS_DIR = (Path.home() / ".codex" / "scripts").resolve()
+
 # Curated name -> import statement. Only unambiguous stdlib/typing names;
 # anything else stays advisory, because guessing a module path produces a file
 # that compiles and is wrong.
@@ -343,11 +348,21 @@ def _shared_tools() -> dict:
 
 
 def _sha1(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+    digest = hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False)
+    return digest.hexdigest()[:16]
+
+
+def _is_hook_source(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(HOOK_SCRIPTS_DIR)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _is_ignored(path: Path) -> bool:
-    return bool({p.lower() for p in path.parts} & IGNORE_DIR_NAMES)
+    hit = {p.lower() for p in path.parts} & IGNORE_DIR_NAMES
+    return bool(hit) and not (hit == {".codex"} and _is_hook_source(path))
 
 
 def autofix_disabled_here(path: Path) -> bool:
